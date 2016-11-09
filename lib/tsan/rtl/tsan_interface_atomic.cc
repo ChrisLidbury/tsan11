@@ -25,6 +25,7 @@
 #include "tsan_flags.h"
 #include "tsan_interface.h"
 #include "tsan_rtl.h"
+//#include "tsan_relaxed.h"
 
 using namespace __tsan;  // NOLINT
 
@@ -51,9 +52,9 @@ static bool IsAcquireOrder(morder mo) {
       || mo == mo_acq_rel || mo == mo_seq_cst;
 }
 
-static bool IsAcqRelOrder(morder mo) {
-  return mo == mo_acq_rel || mo == mo_seq_cst;
-}
+//static bool IsAcqRelOrder(morder mo) {
+//  return mo == mo_acq_rel || mo == mo_seq_cst;
+//}
 
 template<typename T> T func_xchg(volatile T *v, T op) {
   T res = __sync_lock_test_and_set(v, op);
@@ -223,18 +224,40 @@ template<typename T>
 static T AtomicLoad(ThreadState *thr, uptr pc, const volatile T *a,
     morder mo) {
   CHECK(IsLoadOrder(mo));
+  // Could potentially get the lock in read mode if relaxed load.
+  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
+  // Must acquire the SC lock for whole duration, before accessing buffer.
+  if (mo == mo_seq_cst) {
+    ctx->Smtx.Lock();
+    SCRead(thr, pc);
+  }
+  // Check the store buffer.
+  u64 bits;
+  SyncClock *clock;
+  bool buffered =
+      s->store_buffer.FetchStore(thr, &bits, &clock, mo == mo_seq_cst, false);
+  // Get appropriate values depending on if we read from the buffer.
+  T val;
+  if (!buffered) {
+    val = NoTsanAtomicLoad(a, mo);
+    clock = &s->clock;
+  } else {
+    internal_memcpy(&val, &bits, sizeof(T));
+  }
   // This fast-path is critical for performance.
   // Assume the access is atomic.
   if (!IsAcquireOrder(mo)) {
+    NonAcquireLoadImpl(thr, pc, clock);
+    s->mtx.Unlock();
     MemoryReadAtomic(thr, pc, (uptr)a, SizeLog<T>());
-    return NoTsanAtomicLoad(a, mo);
+    return val;
   }
-  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, false);
-  AcquireImpl(thr, pc, &s->clock);
-  T v = NoTsanAtomicLoad(a, mo);
-  s->mtx.ReadUnlock();
+  AcquireImpl(thr, pc, clock);
+  if (mo == mo_seq_cst)
+    ctx->Smtx.Unlock();
+  s->mtx.Unlock();
   MemoryReadAtomic(thr, pc, (uptr)a, SizeLog<T>());
-  return v;
+  return val;
 }
 
 template<typename T>
@@ -254,43 +277,67 @@ static void AtomicStore(ThreadState *thr, uptr pc, volatile T *a, T v,
     morder mo) {
   CHECK(IsStoreOrder(mo));
   MemoryWriteAtomic(thr, pc, (uptr)a, SizeLog<T>());
-  // This fast-path is critical for performance.
-  // Assume the access is atomic.
-  // Strictly saying even relaxed store cuts off release sequence,
-  // so must reset the clock.
-  if (!IsReleaseOrder(mo)) {
-    NoTsanAtomicStore(a, v, mo);
-    return;
-  }
+  // Start of critical section
   __sync_synchronize();
   SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
-  thr->fast_state.IncrementEpoch();
+  // Increment epoch here, even if relaxed, to enforce CoWR.
   // Can't increment epoch w/o writing to the trace as well.
+  thr->fast_state.IncrementEpoch();
   TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
+  // Acquire SC lock here for the whole function?
+  if (mo == mo_seq_cst) {
+    ctx->Smtx.Lock();
+    SCWrite(thr, pc);
+  }
+  // Cache the current state of the location in the store buffer.
+  T val = NoTsanAtomicLoad(a, mo);
+  u64 bits = 0;
+  internal_memcpy(&bits, &val, sizeof(T));
+  s->store_buffer.BufferStore(
+      thr, bits, &s->clock, mo == mo_seq_cst, IsReleaseOrder(mo));
+  // This fast-path is critical for performance.
+  // Assume the access is atomic.
+  if (!IsReleaseOrder(mo)) {
+    NonReleaseStoreImpl(thr, pc, &s->clock);
+    NoTsanAtomicStore(a, v, mo);
+    s->mtx.Unlock();
+    return;
+  }
   ReleaseStoreImpl(thr, pc, &s->clock);
   NoTsanAtomicStore(a, v, mo);
+  if (mo == mo_seq_cst)
+    ctx->Smtx.Unlock();
   s->mtx.Unlock();
 }
 
 template<typename T, T (*F)(volatile T *v, T op)>
 static T AtomicRMW(ThreadState *thr, uptr pc, volatile T *a, T v, morder mo) {
   MemoryWriteAtomic(thr, pc, (uptr)a, SizeLog<T>());
-  SyncVar *s = 0;
-  if (mo != mo_relaxed) {
-    s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
-    thr->fast_state.IncrementEpoch();
-    // Can't increment epoch w/o writing to the trace as well.
-    TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
-    if (IsAcqRelOrder(mo))
-      AcquireReleaseImpl(thr, pc, &s->clock);
-    else if (IsReleaseOrder(mo))
-      ReleaseImpl(thr, pc, &s->clock);
-    else if (IsAcquireOrder(mo))
-      AcquireImpl(thr, pc, &s->clock);
+  // Start of critical section
+  __sync_synchronize();
+  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
+  // Increment epoch here, even if relaxed, to enforce CoWR.
+  // Can't increment epoch w/o writing to the trace as well.
+  thr->fast_state.IncrementEpoch();
+  TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
+  // Treat as SC read and write.
+  if (mo == mo_seq_cst) {
+    ctx->Smtx.Lock();
+    SCRead(thr, pc);
+    SCWrite(thr, pc);
   }
+  // RMW will always put the thread's pos in mo to the end. Done by BufferStore.
+  // Identical to AtomicStore.
+  T val = NoTsanAtomicLoad(a, mo);
+  u64 bits = 0;
+  internal_memcpy(&bits, &val, sizeof(T));
+  s->store_buffer.BufferStore(
+      thr, bits, &s->clock, mo == mo_seq_cst, IsReleaseOrder(mo));
+  RMWImpl(thr, pc, &s->clock, IsAcquireOrder(mo), IsReleaseOrder(mo));
   v = F(a, v);
-  if (s)
-    s->mtx.Unlock();
+  if (mo == mo_seq_cst)
+    ctx->Smtx.Unlock();
+  s->mtx.Unlock();
   return v;
 }
 
@@ -394,7 +441,7 @@ static T NoTsanAtomicCAS(volatile T *a, T c, T v, morder mo, morder fmo) {
   return c;
 }
 
-template<typename T>
+/*template<typename T>
 static bool AtomicCAS(ThreadState *thr, uptr pc,
     volatile T *a, T *c, T v, morder mo, morder fmo) {
   (void)fmo;  // Unused because llvm does not pass it yet.
@@ -425,6 +472,56 @@ static bool AtomicCAS(ThreadState *thr, uptr pc,
     return true;
   *c = pr;
   return false;
+}*/
+
+template<typename T>
+static bool AtomicCAS(ThreadState *thr, uptr pc,
+    volatile T *a, T *c, T v, morder mo, morder fmo) {
+  MemoryWriteAtomic(thr, pc, (uptr)a, SizeLog<T>());
+  // Start of critical section
+  __sync_synchronize();
+  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
+  // Increment epoch here, even if relaxed, to enforce CoWR.
+  // Can't increment epoch w/o writing to the trace as well.
+  thr->fast_state.IncrementEpoch();
+  TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
+  // If the success order is SC, must acquire the lock in case we succeed.
+  if (mo == mo_seq_cst) {
+    ctx->Smtx.Lock();
+  }
+  // Prepare the previous value in case the CAS succeeds.
+  T val = func_cas(a, *c, v);
+  bool success = val == *c;
+  if (success) {
+    if (mo == mo_seq_cst) {
+      SCRead(thr, pc);
+      SCWrite(thr, pc);
+    }
+    // Store previous value only if successful.
+    u64 bits = 0;
+    internal_memcpy(&bits, &val, sizeof(T));
+    s->store_buffer.BufferStore(
+        thr, bits, &s->clock, mo == mo_seq_cst, IsReleaseOrder(mo));
+    // Don't bother if relaxed, unless some stats need updating.
+    if (mo != mo_relaxed) {
+      // Relaxed RMW should not affect the RS states.
+      RMWImpl(thr, pc, &s->clock, IsAcquireOrder(mo), IsReleaseOrder(mo));
+    }
+  } else {
+    if (fmo == mo_seq_cst) {
+      SCRead(thr, pc);
+    }
+    // Nothing is stored, but the mo pos of this thread moves to the end.
+    s->store_buffer.AdvanceToEnd(thr);
+    *c = val;
+    if (IsAcquireOrder(fmo)) {
+      AcquireImpl(thr, pc, &s->clock);
+    }
+  }
+  if (mo == mo_seq_cst)
+    ctx->Smtx.Unlock();
+  s->mtx.Unlock();
+  return success;
 }
 
 template<typename T>
@@ -440,8 +537,26 @@ static void NoTsanAtomicFence(morder mo) {
 }
 
 static void AtomicFence(ThreadState *thr, uptr pc, morder mo) {
-  // FIXME(dvyukov): not implemented.
   __sync_synchronize();
+  if (mo == mo_relaxed) {
+    return;
+  }
+  // Increment epoch to know when the fence occurred in the thread.
+  // Can't increment epoch w/o writing to the trace as well.
+  thr->fast_state.IncrementEpoch();
+  TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);  // Not really a mem op.
+  // Needed for CoRR in the store buffer.
+  if (IsReleaseOrder(mo))
+    thr->last_release = thr->fast_state.epoch();
+  // SC fence
+  if (mo == mo_seq_cst) {
+    ctx->Smtx.Lock();
+    SCFence(thr, pc);
+  }
+  // Acquire and release, let the VC code handle it.
+  FenceImpl(thr, pc, IsLoadOrder(mo), IsReleaseOrder(mo));
+  if (mo == mo_seq_cst)
+    ctx->Smtx.Unlock();
 }
 #endif
 
@@ -457,7 +572,7 @@ static void AtomicFence(ThreadState *thr, uptr pc, morder mo) {
     ThreadState *const thr = cur_thread(); \
     if (thr->ignore_interceptors) \
       return NoTsanAtomic##func(__VA_ARGS__); \
-    AtomicStatInc(thr, sizeof(*a), mo, StatAtomic##func); \
+    AtomicStatInc(thr, sizeof(*a), mo, StatAtomic##func, (StatType)(StatAtomic##func##Relaxed + mo)); \
     ScopedAtomic sa(thr, callpc, a, mo, __func__); \
     return Atomic##func(thr, pc, __VA_ARGS__); \
 /**/
@@ -473,12 +588,15 @@ class ScopedAtomic {
   ~ScopedAtomic() {
     ProcessPendingSignals(thr_);
     FuncExit(thr_);
+    // Scheduling strategy here!
+    //internal_sched_yield();  // random
+    // End scheduling strategy
   }
  private:
   ThreadState *thr_;
 };
 
-static void AtomicStatInc(ThreadState *thr, uptr size, morder mo, StatType t) {
+static void AtomicStatInc(ThreadState *thr, uptr size, morder mo, StatType t, StatType tmo) {
   StatInc(thr, StatAtomic);
   StatInc(thr, t);
   StatInc(thr, size == 1 ? StatAtomic1
@@ -492,6 +610,7 @@ static void AtomicStatInc(ThreadState *thr, uptr size, morder mo, StatType t) {
              : mo == mo_release ? StatAtomicRelease
              : mo == mo_acq_rel ? StatAtomicAcq_Rel
              :                    StatAtomicSeq_Cst);
+  StatInc(thr, tmo);
 }
 
 extern "C" {

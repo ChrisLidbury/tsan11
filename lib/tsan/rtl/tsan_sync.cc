@@ -51,8 +51,9 @@ void SyncVar::Reset(Processor *proc) {
     CHECK_EQ(clock.size(), 0);
     CHECK_EQ(read_clock.size(), 0);
   } else {
-    clock.Reset(&proc->clock_cache);
-    read_clock.Reset(&proc->clock_cache);
+    clock.Reset(&proc->clock_cache, &proc->vclock_cache);
+    read_clock.Reset(&proc->clock_cache, &proc->vclock_cache);
+    store_buffer.Reset(proc);
   }
 }
 

@@ -35,6 +35,7 @@ enum MutexType {
   MutexTypeFired,
   MutexTypeRacy,
   MutexTypeGlobalProc,
+  MutexTypeSC,
 
   // This must be the last.
   MutexTypeCount

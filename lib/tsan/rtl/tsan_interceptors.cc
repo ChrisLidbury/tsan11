@@ -887,6 +887,8 @@ extern "C" void *__tsan_thread_start_func(void *arg) {
     Processor *proc = ProcCreate();
     ProcWire(proc, thr);
     ThreadStart(thr, tid, GetTid());
+    //atomic_store(&p->tid, 0, memory_order_release);
+    //ThreadStart(thr, tid, GetTid());
     atomic_store(&p->tid, 0, memory_order_release);
   }
   void *res = callback(param);

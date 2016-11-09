@@ -42,6 +42,7 @@ set(TSAN_SOURCES
   rtl/tsan_report.cc
   rtl/tsan_rtl.cc
   rtl/tsan_rtl_mutex.cc
+  rtl/tsan_relaxed.cc
   rtl/tsan_rtl_proc.cc
   rtl/tsan_rtl_report.cc
   rtl/tsan_rtl_thread.cc
@@ -84,6 +85,7 @@ set(TSAN_HEADERS
   rtl/tsan_mutex.h
   rtl/tsan_mutexset.h
   rtl/tsan_platform.h
+  rtl/tsan_relaxed.h
   rtl/tsan_report.h
   rtl/tsan_rtl.h
   rtl/tsan_stack_trace.h

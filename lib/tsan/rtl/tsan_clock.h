@@ -40,11 +40,43 @@ struct ClockBlock {
 typedef DenseSlabAlloc<ClockBlock, 1<<16, 1<<10> ClockAlloc;
 typedef DenseSlabAllocCache ClockCache;
 
+// Vector of Vector Clocks for the RMW release sequence tracking.
+// When a new thread performs a RMW with release, add mapping from tid -> VC and
+// release the thread's clock to it.
+// When there is a non-RMW of any kind, collapse VVC to just the VC of the
+// performing thread, or empty everything.
+//
+// Associativity and mem management is difficult, so handle everything linearly
+// for now.
+//
+// ThreadClock will handle it, so the SyncClock will have the VVC inside it.
+struct VClockBlock {
+  static const int kNumElems = 80;  // Limit VVC to 10 for now.
+
+  VClockBlock() {}
+  ~VClockBlock() {}
+
+  u32 clocks_[kNumElems];
+  unsigned tids_[kNumElems];
+  u32 sizes_[kNumElems];
+  unsigned last_free_idx_;
+};
+
+typedef DenseSlabAlloc<VClockBlock, 1<<16, 1<<10> VClockAlloc;
+typedef DenseSlabAllocCache VClockCache;
+
 // The clock that lives in sync variables (mutexes, atomics, etc).
+// TODO: Shallow version for just the tab, allowing us to save space.
+//       (no VVC, just a tab).
 class SyncClock {
  public:
   SyncClock();
   ~SyncClock();
+
+  // Copies the current state of the clock into dest. Ignores the VVC.
+  void CopyClock(ClockCache *c, VClockCache *vc, SyncClock *dst) const;
+  // Joins the clock in src with this, becoming the piecewise maximum.
+  void JoinClock(ClockCache *c, SyncClock *src);
 
   uptr size() const {
     return size_;
@@ -55,7 +87,7 @@ class SyncClock {
   }
 
   void Resize(ClockCache *c, uptr nclk);
-  void Reset(ClockCache *c);
+  void Reset(ClockCache *c, VClockCache *vc);
 
   void DebugDump(int(*printf)(const char *s, ...));
 
@@ -73,6 +105,11 @@ class SyncClock {
   ClockBlock *tab_;
   u32 tab_idx_;
   u32 size_;
+
+  // For RMWs. if multiple RSs are created, use the VCC.
+  VClockBlock *vclock_;
+  u32 vclock_idx_;
+  bool vvc_in_use_;
 
   ClockElem &elem(unsigned tid) const;
 };
@@ -105,9 +142,16 @@ struct ThreadClock {
   }
 
   void acquire(ClockCache *c, const SyncClock *src);
-  void release(ClockCache *c, SyncClock *dst) const;
-  void acq_rel(ClockCache *c, SyncClock *dst);
-  void ReleaseStore(ClockCache *c, SyncClock *dst) const;
+  void release(ClockCache *c, VClockCache *vc, SyncClock *dst) const;
+  void acq_rel(ClockCache *c, VClockCache *vc, SyncClock *dst);
+  void ReleaseStore(ClockCache *c, VClockCache *vc, SyncClock *dst) const;
+
+  // Extras for RS support, we let thread clock code handle it.
+  void NonReleaseStore(ClockCache *c, VClockCache *vc, SyncClock *dst, SyncClock *Frel_clock) const;
+  void NonReleaseStore2(ClockCache *c, VClockCache *vc, SyncClock *dst, SyncClock *Frel_clock) const;  // Merge with 1.
+  void RMW(ClockCache *c, VClockCache *vc, SyncClock *dst, bool is_acquire, bool is_release, SyncClock *Facq_clock, SyncClock *Frel_clock);
+  void FenceRelease(ClockCache *c, VClockCache *vc, SyncClock *dst);
+  void FenceAcquire(ClockCache *c, VClockCache *vc, SyncClock *src);
 
   void DebugReset();
   void DebugDump(int(*printf)(const char *s, ...));

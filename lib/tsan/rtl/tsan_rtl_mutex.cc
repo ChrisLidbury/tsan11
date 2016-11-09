@@ -446,7 +446,7 @@ void ReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c) {
     return;
   thr->clock.set(thr->fast_state.epoch());
   thr->fast_synch_epoch = thr->fast_state.epoch();
-  thr->clock.release(&thr->proc()->clock_cache, c);
+  thr->clock.release(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, c);
   StatInc(thr, StatSyncRelease);
 }
 
@@ -455,7 +455,8 @@ void ReleaseStoreImpl(ThreadState *thr, uptr pc, SyncClock *c) {
     return;
   thr->clock.set(thr->fast_state.epoch());
   thr->fast_synch_epoch = thr->fast_state.epoch();
-  thr->clock.ReleaseStore(&thr->proc()->clock_cache, c);
+  thr->clock.ReleaseStore(
+      &thr->proc()->clock_cache, &thr->proc()->vclock_cache, c);
   StatInc(thr, StatSyncRelease);
 }
 
@@ -464,9 +465,66 @@ void AcquireReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c) {
     return;
   thr->clock.set(thr->fast_state.epoch());
   thr->fast_synch_epoch = thr->fast_state.epoch();
-  thr->clock.acq_rel(&thr->proc()->clock_cache, c);
+  thr->clock.acq_rel(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, c);
   StatInc(thr, StatSyncAcquire);
   StatInc(thr, StatSyncRelease);
+}
+
+void NonReleaseStoreImpl(ThreadState *thr, uptr pc, SyncClock *c) {
+  if (thr->ignore_sync)
+    return;
+  thr->clock.set(thr->fast_state.epoch());
+//  thr->fast_synch_epoch = thr->fast_state.epoch();
+  thr->clock.NonReleaseStore(&thr->proc()->clock_cache,
+                             &thr->proc()->vclock_cache, c, &thr->Frel_clock);
+  thr->clock.NonReleaseStore2(&thr->proc()->clock_cache,
+                              &thr->proc()->vclock_cache, c, &thr->Frel_clock);
+  // TODO stats
+}
+
+void NonAcquireLoadImpl(ThreadState *thr, uptr pc, SyncClock *c) {
+  thr->clock.set(thr->fast_state.epoch());
+  thr->Facq_clock.JoinClock(&thr->proc()->clock_cache, c);
+}
+
+void RMWImpl(ThreadState *thr, uptr pc, SyncClock *c,
+             bool is_acquire, bool is_release) {
+  if (thr->ignore_sync)
+    return;
+  thr->clock.set(thr->fast_state.epoch());
+  thr->fast_synch_epoch = thr->fast_state.epoch();
+  thr->clock.RMW(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, c,
+                 is_acquire, is_release, &thr->Facq_clock, &thr->Frel_clock);
+  // TODO stats
+}
+
+void FenceImpl(ThreadState *thr, uptr pc, bool is_acquire, bool is_release) {
+  if (thr->ignore_sync)
+    return;
+  thr->clock.set(thr->fast_state.epoch());
+  thr->fast_synch_epoch = thr->fast_state.epoch();
+  if (is_release) {
+    thr->clock.FenceRelease(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, &thr->Frel_clock);
+  }
+  if (is_acquire) {
+    thr->clock.FenceAcquire(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, &thr->Facq_clock);
+  }
+}
+
+void SCFence(ThreadState *thr, uptr pc) {
+  thr->clock.set(thr->fast_state.epoch());
+  ctx->Sfence.set(thr->tid, thr->clock.get(thr->tid));
+  ctx->Sfence.release(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, &thr->Slimit);
+  ctx->Swrite.release(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, &thr->Swrite);
+}
+
+void SCWrite(ThreadState *thr, uptr pc) {
+  thr->clock.set(thr->fast_state.epoch());
+  ctx->Swrite.set(thr->tid, thr->clock.get(thr->tid));
+}
+
+void SCRead(ThreadState *thr, uptr pc) {
+  ctx->Sfence.release(&thr->proc()->clock_cache, &thr->proc()->vclock_cache, &thr->Sread);
 }
 
 void ReportDeadlock(ThreadState *thr, uptr pc, DDReport *r) {

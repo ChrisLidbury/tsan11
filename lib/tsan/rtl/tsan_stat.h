@@ -16,6 +16,14 @@
 
 namespace __tsan {
 
+#define STATCROSS(t) \
+  StatAtomic##t##Relaxed, \
+  StatAtomic##t##Consume, \
+  StatAtomic##t##Acquire, \
+  StatAtomic##t##Release, \
+  StatAtomic##t##Acq_Rel, \
+  StatAtomic##t##Seq_Cst
+
 enum StatType {
   // Memory access processing related stuff.
   StatMop,
@@ -96,6 +104,22 @@ enum StatType {
   // Clocks - acquire-release.
   StatClockAcquireRelease,
 
+  // tsan11
+  StatTsan11,
+  StatVVC,
+  StatInitVVC,
+  StatAddToVVC,
+  StatModifyVVC,
+  StatCollapseVVC,
+  StatRelaxed,
+  StatStoreElemCreate,
+  StatStoreElemFall,
+  StatLoadElemCreate,
+  StatLoadElemMove,
+  StatLoadElemFall,
+  StatLoadElemDelete,
+  StatUniqueStore,
+
   // Atomics.
   StatAtomic,
   StatAtomicLoad,
@@ -120,6 +144,19 @@ enum StatType {
   StatAtomic4,
   StatAtomic8,
   StatAtomic16,
+
+  // Atomic combinations.
+  STATCROSS(Load),
+  STATCROSS(Store),
+  STATCROSS(Exchange),
+  STATCROSS(FetchAdd),
+  STATCROSS(FetchSub),
+  STATCROSS(FetchAnd),
+  STATCROSS(FetchOr),
+  STATCROSS(FetchXor),
+  STATCROSS(FetchNand),
+  STATCROSS(CAS),
+  STATCROSS(Fence),
 
   // Dynamic annotations.
   StatAnnotation,
@@ -173,11 +210,14 @@ enum StatType {
   StatMtxFired,
   StatMtxRacy,
   StatMtxFD,
+  StatMtxSC,
   StatMtxGlobalProc,
 
   // This must be the last.
   StatCnt
 };
+
+#undef STATCROSS
 
 }  // namespace __tsan
 

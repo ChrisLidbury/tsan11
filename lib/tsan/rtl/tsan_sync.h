@@ -20,6 +20,7 @@
 #include "tsan_clock.h"
 #include "tsan_mutex.h"
 #include "tsan_dense_alloc.h"
+#include "tsan_relaxed.h"
 
 namespace __tsan {
 
@@ -41,6 +42,10 @@ struct SyncVar {
   bool is_linker_init;
   u32 next;  // in MetaMap
   DDMutex dd;
+  //
+  // StoreBuffer of previous writes.
+  StoreBuffer store_buffer;
+  //
   SyncClock read_clock;  // Used for rw mutexes only.
   // The clock is placed last, so that it is situated on a different cache line
   // with the mtx. This reduces contention for hot sync objects.

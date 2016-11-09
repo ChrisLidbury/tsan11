@@ -272,9 +272,31 @@ struct Mapping46 {
   static const uptr kVdsoBeg       = 0x7800000000000000ull;
 };
 
+//<<<<<<< .mine
+// Fits all user memory into the shadow memory space.
+//
+// Module and stack memory is 7e80 0000 0000 - 7fff ffff ffff
+//   7e80 0000 0000 - 7eff ffff ffff maps to 0200 0000 0000 - 03ff ffff ffff
+//   7f00 0000 0000 - 7fff ffff ffff maps to 0400 0000 0000 - 07ff ffff ffff
+//
+// Static memory is 0000 0000 1000 - 0100 0000 0000
+//   which maps to 0800 0000 4000 - 0bff ffff ffff
+//
+// Heap memory is 7d00 0000 0000 - 7dff ffff ffff
+//   which maps to 0c00 0000 0000 - 0fff ffff ffff
+//
+// Shadow memory region 0800 0000 0000 - 0800 0000 3fff is unused.
+//ALWAYS_INLINE
+//uptr MemToShadow(uptr x) {
+//  DCHECK(IsAppMem(x));
+//  return (((x) & ~(kAppMemMsk | (kShadowCell - 1)))
+//      ^ kAppMemXor) * kShadowCnt;
+//}
+//=======
 // Indicates the runtime will define the memory regions at runtime.
 #define TSAN_RUNTIME_VMA 1
 #endif
+//>>>>>>> .r272794
 
 #elif SANITIZER_GO && !SANITIZER_WINDOWS
 

@@ -103,7 +103,10 @@ Context::Context()
   , racy_stacks(MBlockRacyStacks)
   , racy_addresses(MBlockRacyAddresses)
   , fired_suppressions_mtx(MutexTypeFired, StatMtxFired)
-  , fired_suppressions(8) {
+  , fired_suppressions(8)
+  , Smtx(MutexTypeSC, StatMtxSC)
+  , Sfence(0)
+  , Swrite(0) {
 }
 
 // The objects are allocated in TLS, so one may rely on zero-initialization.

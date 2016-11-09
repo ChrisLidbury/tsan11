@@ -108,6 +108,14 @@ void __tsan_func_exit() {
   FuncExit(cur_thread());
 }
 
+void __tsan_debug_start() {
+  cur_thread()->in_debug = true;
+}
+
+void __tsan_debug_end() {
+  cur_thread()->in_debug = false;
+}
+
 void __tsan_read_range(void *addr, uptr size) {
   MemoryAccessRange(cur_thread(), CALLERPC, (uptr)addr, size, false);
 }

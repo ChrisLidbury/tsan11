@@ -174,6 +174,7 @@ class FastState {
 // Shadow (from most significant bit):
 //   freed           : 1
 //   tid             : kTidBits
+//   unused          : 1 ?
 //   is_atomic       : 1
 //   is_read         : 1
 //   size_log        : 2
@@ -348,6 +349,9 @@ struct Processor {
   DenseSlabAllocCache block_cache;
   DenseSlabAllocCache sync_cache;
   DenseSlabAllocCache clock_cache;
+  DenseSlabAllocCache vclock_cache;
+  DenseSlabAllocCache store_cache;
+  DenseSlabAllocCache load_cache;
   DDPhysicalThread *dd_pt;
 };
 
@@ -415,6 +419,18 @@ struct ThreadState {
   const uptr tls_addr;
   const uptr tls_size;
   ThreadContext *tctx;
+
+  // Is Printf turned on.
+  bool in_debug;
+  // Last release store.
+  u64 last_release;
+  // Acquire and release fence clocks.
+  SyncClock Frel_clock;
+  SyncClock Facq_clock;
+  // SC limit clock.
+  SyncClock Slimit;  // Hard limit on all accesses.
+  SyncClock Swrite;  // Limit on reading from SC writes.
+  SyncClock Sread;   // Limit only for SC reads.
 
 #if SANITIZER_DEBUG && !SANITIZER_GO
   InternalDeadlockDetector internal_deadlock_detector;
@@ -534,7 +550,20 @@ struct Context {
   InternalMmapVector<FiredSuppression> fired_suppressions;
   DDetector *dd;
 
+  // For SC fences, along with Slimit per thread.
+  // A thread will usually only update its own index, in which case only a read
+  // lock is required, but if it needs to acquire a whole clock or resize, then
+  // a write lock should be held.
+  Mutex Smtx;
+  //SyncClock Sfence;
+  //SyncClock Swrite;
+  ThreadClock Sfence;
+  ThreadClock Swrite;
+
   ClockAlloc clock_alloc;
+  VClockAlloc vclock_alloc;
+  StoreAlloc store_alloc;
+  LoadAlloc load_alloc;
 
   Flags flags;
 
@@ -639,17 +668,19 @@ bool IsFiredSuppression(Context *ctx, ReportType type, StackTrace trace);
 bool IsExpectedReport(uptr addr, uptr size);
 void PrintMatchedBenignRaces();
 
-#if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 1
-# define DPrintf Printf
-#else
-# define DPrintf(...)
-#endif
+//#if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 1
+# define DPrintf Printf_
+//#else
+//# define DPrintf(...)
+//#endif
 
-#if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 2
-# define DPrintf2 Printf
-#else
-# define DPrintf2(...)
-#endif
+//#if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 2
+# define DPrintf2 Printf_
+//#else
+//# define DPrintf2(...)
+//#endif
+
+#define Printf_ if (cur_thread()->in_debug) Printf
 
 u32 CurrentStackId(ThreadState *thr, uptr pc);
 ReportStack *SymbolizeStackId(u32 stack_id);
@@ -754,6 +785,17 @@ void AcquireImpl(ThreadState *thr, uptr pc, SyncClock *c);
 void ReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c);
 void ReleaseStoreImpl(ThreadState *thr, uptr pc, SyncClock *c);
 void AcquireReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c);
+// Extra for RS.
+void NonReleaseStoreImpl(ThreadState *thr, uptr pc, SyncClock *c);
+void NonAcquireLoadImpl(ThreadState *thr, uptr pc, SyncClock *c);
+void RMWImpl(ThreadState *thr, uptr pc, SyncClock *c,
+             bool is_acquire, bool is_release);
+void FenceImpl(ThreadState *thr, uptr pc, bool is_acquire, bool is_release);
+// Extra for SC fence consistency.
+// SC mutex must be held.
+void SCFence(ThreadState *thr, uptr pc);
+void SCWrite(ThreadState *thr, uptr pc);
+void SCRead(ThreadState *thr, uptr pc);
 
 // The hacky call uses custom calling convention and an assembly thunk.
 // It is considerably faster that a normal call for the caller

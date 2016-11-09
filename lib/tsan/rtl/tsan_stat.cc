@@ -22,6 +22,14 @@ void StatAggregate(u64 *dst, u64 *src) {
     dst[i] += src[i];
 }
 
+#define STATCROSS(t) \
+  name[StatAtomic##t##Relaxed]                = "  "#t" with relaxed             "; \
+  name[StatAtomic##t##Consume]                = "  "#t" with consume             "; \
+  name[StatAtomic##t##Acquire]                = "  "#t" with acquire             "; \
+  name[StatAtomic##t##Release]                = "  "#t" with release             "; \
+  name[StatAtomic##t##Acq_Rel]                = "  "#t" with acq_rel             "; \
+  name[StatAtomic##t##Seq_Cst]                = "  "#t" with seq_cst             "
+
 void StatOutput(u64 *stat) {
   stat[StatShadowNonZero] = stat[StatShadowProcessed] - stat[StatShadowZero];
 
@@ -94,6 +102,21 @@ void StatOutput(u64 *stat) {
   name[StatClockStoreTail]               = "  clear tail                      ";
   name[StatClockAcquireRelease]          = "Clock acquire-release             ";
 
+  name[StatTsan11]                       = "tsan11 statictics                 ";
+  name[StatVVC]                          = "  VVC operations                  ";
+  name[StatInitVVC]                      = "      init                        ";
+  name[StatAddToVVC]                     = "      add                         ";
+  name[StatModifyVVC]                    = "      modify                      ";
+  name[StatCollapseVVC]                  = "      collapse                    ";
+  name[StatRelaxed]                      = "  Relaxed elements                ";
+  name[StatStoreElemCreate]              = "    Store elements created        ";
+  name[StatStoreElemFall]                = "    Store elements fall off back  ";
+  name[StatLoadElemCreate]               = "    Load elements created         ";
+  name[StatLoadElemMove]                 = "    Load elements moved           ";
+  name[StatLoadElemFall]                 = "    Load elements fall off back   ";
+  name[StatLoadElemDelete]               = "    Load elements deleted         ";
+  name[StatUniqueStore]                  = "    Unique locations stored to    ";
+
   name[StatAtomic]                       = "Atomic operations                 ";
   name[StatAtomicLoad]                   = "  Including load                  ";
   name[StatAtomicStore]                  = "            store                 ";
@@ -117,6 +140,18 @@ void StatOutput(u64 *stat) {
   name[StatAtomic4]                      = "            size 4                ";
   name[StatAtomic8]                      = "            size 8                ";
   name[StatAtomic16]                     = "            size 16               ";
+
+  STATCROSS(Load);
+  STATCROSS(Store);
+  STATCROSS(Exchange);
+  STATCROSS(FetchAdd);
+  STATCROSS(FetchSub);
+  STATCROSS(FetchAnd);
+  STATCROSS(FetchOr);
+  STATCROSS(FetchXor);
+  STATCROSS(FetchNand);
+  STATCROSS(CAS);
+  STATCROSS(Fence);
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";
@@ -168,6 +203,7 @@ void StatOutput(u64 *stat) {
   name[StatMtxFired]                     = "  FiredSuppressions               ";
   name[StatMtxRacy]                      = "  RacyStacks                      ";
   name[StatMtxFD]                        = "  FD                              ";
+  name[StatMtxSC]                        = "  SC                              ";
   name[StatMtxGlobalProc]                = "  GlobalProc                      ";
 
   Printf("Statistics:\n");

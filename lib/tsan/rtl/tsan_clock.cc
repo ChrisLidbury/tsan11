@@ -158,14 +158,14 @@ void ThreadClock::acquire(ClockCache *c, const SyncClock *src) {
   }
 }
 
-void ThreadClock::release(ClockCache *c, SyncClock *dst) const {
+void ThreadClock::release(ClockCache *c, VClockCache *vc, SyncClock *dst) const {
   DCHECK_LE(nclk_, kMaxTid);
   DCHECK_LE(dst->size_, kMaxTid);
 
-  if (dst->size_ == 0) {
+  if (dst->size_ == 0) { // TODO used by locks, not yet compatible with VVC.
     // ReleaseStore will correctly set release_store_tid_,
     // which can be important for future operations.
-    ReleaseStore(c, dst);
+    ReleaseStore(c, vc, dst);
     return;
   }
 
@@ -212,10 +212,16 @@ void ThreadClock::release(ClockCache *c, SyncClock *dst) const {
     dst->elem(tid_).reused = reused_;
 }
 
-void ThreadClock::ReleaseStore(ClockCache *c, SyncClock *dst) const {
+void ThreadClock::ReleaseStore(ClockCache *c, VClockCache *vc, SyncClock *dst) const {
   DCHECK_LE(nclk_, kMaxTid);
   DCHECK_LE(dst->size_, kMaxTid);
   CPP_STAT_INC(StatClockStore);
+
+  // If vvc is in use, must reset then release.
+  if (dst->vvc_in_use_) {
+    CPP_STAT_INC(StatCollapseVVC);
+    dst->Reset(c, vc);
+  }
 
   // Check if we need to resize dst.
   if (dst->size_ < nclk_)
@@ -253,10 +259,10 @@ void ThreadClock::ReleaseStore(ClockCache *c, SyncClock *dst) const {
   dst->elem(tid_).reused = reused_;
 }
 
-void ThreadClock::acq_rel(ClockCache *c, SyncClock *dst) {
+void ThreadClock::acq_rel(ClockCache *c, VClockCache *vc, SyncClock *dst) {
   CPP_STAT_INC(StatClockAcquireRelease);
   acquire(c, dst);
-  ReleaseStore(c, dst);
+  ReleaseStore(c, vc, dst);
 }
 
 // Updates only single element related to the current thread in dst->clk_.
@@ -371,7 +377,9 @@ SyncClock::SyncClock()
     , release_store_reused_()
     , tab_()
     , tab_idx_()
-    , size_() {
+    , size_()
+    , vclock_()
+    , vvc_in_use_() {
   for (uptr i = 0; i < kDirtyTids; i++)
     dirty_tids_[i] = kInvalidTid;
 }
@@ -383,7 +391,50 @@ SyncClock::~SyncClock() {
   CHECK_EQ(tab_idx_, 0);
 }
 
-void SyncClock::Reset(ClockCache *c) {
+void SyncClock::CopyClock(ClockCache *c, VClockCache *vc, SyncClock *dst) const {
+  // Must copy to empty clock.
+  //CHECK_EQ(dst->size_, 0);
+  //CHECK_EQ(dst->tab_, 0);
+  //CHECK_EQ(dst->tab_idx_, 0);
+  dst->Reset(c, vc);
+
+  if (size_ == 0)
+    return;
+  dst->Resize(c, size_);
+
+  // Copy raw data, this is duplicated, needs cleaning.
+  if (dst->size_ <= ClockBlock::kClockCount) {
+    internal_memcpy(dst->tab_, tab_, sizeof(*dst->tab_));
+  } else {
+    for (unsigned idx = 0; idx < dst->size_; idx += ClockBlock::kClockCount) {
+      u32 tab_idx = tab_->table[idx / ClockBlock::kClockCount];
+      ClockBlock *cb = ctx->clock_alloc.Map(tab_idx);
+      tab_idx = dst->tab_->table[idx / ClockBlock::kClockCount];
+      ClockBlock *cb_new = ctx->clock_alloc.Map(tab_idx);
+      internal_memcpy(cb_new->clock, cb->clock, sizeof(*cb->clock));
+    }
+  }
+}
+
+void SyncClock::JoinClock(ClockCache *c, SyncClock *src) {
+  if (src->size_ > size_)
+    Resize(c, src->size_);
+
+  for (uptr i = 0; i < src->size_; i++) {
+    ClockElem &ce = elem(i);
+    ClockElem &src_ce = src->elem(i);
+    ce.epoch = max(ce.epoch, src_ce.epoch);
+    ce.reused = 0;
+  }
+
+  // Not really sure what this does but w/e we'll go with it.
+  for (unsigned i = 0; i < kDirtyTids; i++)
+    dirty_tids_[i] = kInvalidTid;
+  release_store_tid_ = kInvalidTid;
+  release_store_reused_ = 0;
+}
+
+void SyncClock::Reset(ClockCache *c, VClockCache *vc) {
   if (size_ == 0) {
     // nothing
   } else if (size_ <= ClockBlock::kClockCount) {
@@ -402,6 +453,25 @@ void SyncClock::Reset(ClockCache *c) {
   release_store_reused_ = 0;
   for (uptr i = 0; i < kDirtyTids; i++)
     dirty_tids_[i] = kInvalidTid;
+
+  // For the VVC
+  if (vvc_in_use_) {
+    for (unsigned idx = 0; idx < VClockBlock::kNumElems; ++idx) {
+      if (vclock_->sizes_[idx] == 0)
+        continue;
+      if (vclock_->sizes_[idx] <= ClockBlock::kClockCount) {
+        ctx->clock_alloc.Free(c, vclock_->clocks_[idx]);
+      } else {
+        ClockBlock *cb = ctx->clock_alloc.Map(vclock_->clocks_[idx]);
+        for (uptr i = 0; i < vclock_->sizes_[idx]; i += ClockBlock::kClockCount)
+          ctx->clock_alloc.Free(c, cb->table[i / ClockBlock::kClockCount]);
+        ctx->clock_alloc.Free(c, vclock_->clocks_[idx]);
+      }
+      vclock_->sizes_[idx] = 0;
+    }
+    ctx->vclock_alloc.Free(vc, vclock_idx_);
+    vvc_in_use_ = false;
+  }
 }
 
 ClockElem &SyncClock::elem(unsigned tid) const {
@@ -424,4 +494,167 @@ void SyncClock::DebugDump(int(*printf)(const char *s, ...)) {
       release_store_tid_, release_store_reused_,
       dirty_tids_[0], dirty_tids_[1]);
 }
+
+void ThreadClock::NonReleaseStore(ClockCache *c, VClockCache *vc,
+                                  SyncClock *dst, SyncClock *Frel_clock) const {
+  // No VVC, block if relaxed write is from non-releasing thread.
+  if (!dst->vvc_in_use_) {
+    if (dst->release_store_tid_ != tid_)
+      dst->Reset(c, vc);
+    return;
+  }
+  CPP_STAT_INC(StatCollapseVVC);
+
+  // Try and find VC in VVC for this thread.
+  unsigned idx;
+  for (idx = 0; idx < dst->vclock_->last_free_idx_; ++idx) {
+    if (dst->vclock_->tids_[idx] == tid_)
+      break;
+  }
+
+  // If no VC, block all RS and return.
+  if (idx == dst->vclock_->last_free_idx_) {
+    dst->Reset(c, vc);
+    return;
+  }
+
+  // If VC found, save this RS and block all others.
+  u32 tab_idx = dst->vclock_->clocks_[idx];
+  u32 size = dst->vclock_->sizes_[idx];
+  dst->vclock_->clocks_[idx] = 0;
+  dst->vclock_->sizes_[idx] = 0;
+  dst->Reset(c, vc);
+  dst->tab_idx_ = tab_idx;
+  dst->size_ = size;
+  dst->tab_ = ctx->clock_alloc.Map(tab_idx);
+  dst->release_store_tid_ = tid_;
+}
+
+void ThreadClock::NonReleaseStore2(ClockCache *c, VClockCache *vc, SyncClock *dst, SyncClock *Frel_clock) const {
+  CHECK(dst->release_store_tid_ == tid_ || dst->size_ == 0);
+  if (Frel_clock->size_ != 0 &&
+      (dst->size_ == 0 || (dst->get(tid_) < Frel_clock->get(tid_)))) {
+    Frel_clock->CopyClock(c, vc, dst);
+    dst->release_store_tid_ = tid_;
+  }
+}
+
+void ThreadClock::RMW(ClockCache *c, VClockCache *vc, SyncClock *dst,
+    bool is_acquire, bool is_release,
+    SyncClock *Facq_clock, SyncClock *Frel_clock) {
+  // acquire is simple, just the same as non RMW.
+  if (is_acquire)
+    acquire(c, dst);
+  else
+    Facq_clock->JoinClock(c, dst);
+
+  // If not release, and no fences. All RSs will continue.
+  if (!is_release && Frel_clock->size_ == 0)
+    return;
+
+  // Check for simple case, where there is no current RS or there is one with
+  // the same tid.
+  if (!dst->vvc_in_use_ && (dst->size_ == 0 || dst->release_store_tid_ == tid_)) {
+    if (is_release)
+      release(c, vc, dst);
+    else
+      NonReleaseStore2(c, vc, dst, Frel_clock);
+    return;
+  }
+
+  // In the case of a relaxed RMW, the VVC does not need to change, because:
+  //  - If the thread then does a release store, the VVC is not used, as a
+  //    normal release to the VC is appropriate.
+  //  - If the thread then does a relaxed store, we have:
+  //   - The fence occurred before the last release, so Frel < Ct, and so
+  //     joining Frel onto the VC won't change anything, leaving it correct.
+  //   - The fence occurred after the last release, so setting the VC to Frel as
+  //     normal is correct.
+  //
+  // At this point, we have established that there will now be multiple (h)rs.
+  // If the VVC is still not being used, release_tid must be set to a bogus
+  // value so the thread that did the first release knows to clear the VC.
+  if (!is_release) {
+     dst->JoinClock(c, Frel_clock);
+     dst->release_store_tid_ = -1;
+     return;
+  }
+
+  // Not so simple case where vcc is not in use, but need to migrate to it.
+  if (!dst->vvc_in_use_) {
+    CPP_STAT_INC(StatInitVVC);
+    dst->vclock_idx_ = ctx->vclock_alloc.Alloc(vc);
+    dst->vclock_ = ctx->vclock_alloc.Map(dst->vclock_idx_);
+    dst->vclock_->tids_[0] = dst->release_store_tid_;
+    dst->vclock_->clocks_[0] = dst->tab_idx_;
+    dst->vclock_->sizes_[0] = dst->size_;
+    ClockBlock *old_tab = dst->tab_;
+    // Allocate new tabs for SyncVar clock and allocate space equal to old size.
+    uptr nclk = dst->size_;
+    dst->size_ = 0;
+    dst->tab_ = 0;
+    dst->tab_idx_ = 0;
+    dst->Resize(c, nclk);
+    // Set new clock to moved clock, merge will happen later.
+    if (dst->size_ <= ClockBlock::kClockCount) {
+      internal_memcpy(dst->tab_, old_tab, sizeof(*dst->tab_));
+    } else {
+      for (unsigned idx = 0; idx < dst->size_; idx += ClockBlock::kClockCount) {
+        u32 tab_idx = old_tab->table[idx / ClockBlock::kClockCount];
+        ClockBlock *cb = ctx->clock_alloc.Map(tab_idx);
+        tab_idx = dst->tab_->table[idx / ClockBlock::kClockCount];
+        ClockBlock *cb_new = ctx->clock_alloc.Map(tab_idx);
+        internal_memcpy(cb_new->clock, cb->clock, sizeof(*cb->clock));
+      }
+    }
+    dst->vvc_in_use_ = true;
+    dst->vclock_->last_free_idx_ = 1;
+  }
+
+  // vvc is in use and may need to add thread clock to vvc, but before, merge
+  // with the main clock.
+  release(c, vc, dst);
+
+  // Remove existing entry if it exists (easier to do but more expensive).
+  // Create new entry.
+  unsigned idx;
+  for (idx = 0; idx < dst->vclock_->last_free_idx_; ++idx) {
+    if (dst->vclock_->tids_[idx] == tid_)
+      break;
+  }
+  if (idx == VClockBlock::kNumElems) {
+    Printf("Too many VCs for RMW.");
+    Die();
+  }
+  if (idx != dst->vclock_->last_free_idx_) {
+    CPP_STAT_INC(StatModifyVVC);
+    if (dst->vclock_->sizes_[idx] <= ClockBlock::kClockCount) {
+      ctx->clock_alloc.Free(c, dst->vclock_->clocks_[idx]);
+    } else {
+      ClockBlock *cb = ctx->clock_alloc.Map(dst->vclock_->clocks_[idx]);
+      for (uptr i = 0; i < dst->vclock_->sizes_[idx]; i += ClockBlock::kClockCount)
+        ctx->clock_alloc.Free(c, cb->table[i / ClockBlock::kClockCount]);
+      ctx->clock_alloc.Free(c, dst->vclock_->clocks_[idx]);
+    }
+  } else {
+    CPP_STAT_INC(StatAddToVVC);
+    ++dst->vclock_->last_free_idx_;
+  }
+  SyncClock tmp;
+  ReleaseStore(c, vc, &tmp);
+  dst->vclock_->tids_[idx] = tmp.release_store_tid_;
+  dst->vclock_->clocks_[idx] = tmp.tab_idx_;
+  dst->vclock_->sizes_[idx] = tmp.size_;
+  tmp.size_ = 0;
+  tmp.Reset(c, vc);
+}
+
+void ThreadClock::FenceRelease(ClockCache *c, VClockCache *vc, SyncClock *dst) {
+  release(c, vc, dst);
+}
+
+void ThreadClock::FenceAcquire(ClockCache *c, VClockCache *vc, SyncClock *src) {
+  acquire(c, src);
+}
+
 }  // namespace __tsan

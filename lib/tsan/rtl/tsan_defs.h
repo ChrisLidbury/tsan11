@@ -25,7 +25,7 @@
 #endif
 
 #ifndef TSAN_COLLECT_STATS
-# define TSAN_COLLECT_STATS 0
+# define TSAN_COLLECT_STATS 0//1
 #endif
 
 #ifndef TSAN_CONTAINS_UBSAN
