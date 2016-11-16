@@ -44,6 +44,7 @@
 #include "tsan_platform.h"
 #include "tsan_mutexset.h"
 #include "tsan_ignoreset.h"
+#include "tsan_schedule.h"
 #include "tsan_stack_trace.h"
 
 #if SANITIZER_WORDSIZE != 64
@@ -549,6 +550,7 @@ struct Context {
   Mutex fired_suppressions_mtx;
   InternalMmapVector<FiredSuppression> fired_suppressions;
   DDetector *dd;
+  Scheduler scheduler;
 
   // For SC fences, along with Slimit per thread.
   // A thread will usually only update its own index, in which case only a read

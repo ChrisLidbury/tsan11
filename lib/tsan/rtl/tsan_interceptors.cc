@@ -958,7 +958,11 @@ TSAN_INTERCEPTOR(int, pthread_join, void *th, void **ret) {
   SCOPED_INTERCEPTOR_RAW(pthread_join, th, ret);
   int tid = ThreadTid(thr, pc, (uptr)th);
   ThreadIgnoreBegin(thr, pc);
+  // scheduler
+  ::ctx->scheduler.Disable(thr);
   int res = BLOCK_REAL(pthread_join)(th, ret);
+  // scheduler
+  ::ctx->scheduler.Enable(thr);
   ThreadIgnoreEnd(thr, pc);
   if (res == 0) {
     ThreadJoin(thr, pc, tid);

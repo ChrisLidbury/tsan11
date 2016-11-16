@@ -204,6 +204,7 @@ void StatOutput(u64 *stat) {
   name[StatMtxRacy]                      = "  RacyStacks                      ";
   name[StatMtxFD]                        = "  FD                              ";
   name[StatMtxSC]                        = "  SC                              ";
+  name[StatMtxScheduler]                 = "  Scheduler                       ";
   name[StatMtxGlobalProc]                = "  GlobalProc                      ";
 
   Printf("Statistics:\n");

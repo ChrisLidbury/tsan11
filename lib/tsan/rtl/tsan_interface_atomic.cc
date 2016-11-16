@@ -582,6 +582,8 @@ class ScopedAtomic {
   ScopedAtomic(ThreadState *thr, uptr pc, const volatile void *a,
                morder mo, const char *func)
       : thr_(thr) {
+    // Scheduler
+    ctx->scheduler.Wait(thr);
     FuncEntry(thr_, pc);
     DPrintf("#%d: %s(%p, %d)\n", thr_->tid, func, a, mo);
   }
@@ -589,7 +591,7 @@ class ScopedAtomic {
     ProcessPendingSignals(thr_);
     FuncExit(thr_);
     // Scheduling strategy here!
-    //internal_sched_yield();  // random
+    ctx->scheduler.Tick(thr_);
     // End scheduling strategy
   }
  private:

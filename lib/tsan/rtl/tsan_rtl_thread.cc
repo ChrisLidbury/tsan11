@@ -16,6 +16,7 @@
 #include "tsan_mman.h"
 #include "tsan_platform.h"
 #include "tsan_report.h"
+#include "tsan_schedule.h"
 #include "tsan_sync.h"
 
 namespace __tsan {
@@ -237,6 +238,8 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
   u32 parent_tid = thr ? thr->tid : kInvalidTid;  // No parent for GCD workers.
   int tid =
       ctx->thread_registry->CreateThread(uid, detached, parent_tid, &args);
+  // Scheduling
+  ctx->scheduler.NewThread(thr, tid);
   DPrintf("#%d: ThreadCreate tid=%d uid=%zu\n", parent_tid, tid, uid);
   StatSet(thr, StatThreadMaxAlive, ctx->thread_registry->GetMaxAliveThreads());
   return tid;
@@ -294,6 +297,10 @@ void ThreadFinish(ThreadState *thr) {
     DontNeedShadowFor(thr->stk_addr, thr->stk_size);
   if (thr->tls_addr && thr->tls_size)
     DontNeedShadowFor(thr->tls_addr, thr->tls_size);
+
+  // Scheduler
+  ctx->scheduler.DeleteThread(thr);
+
   thr->is_dead = true;
   ctx->thread_registry->FinishThread(thr->tid);
 }

@@ -211,6 +211,7 @@ enum StatType {
   StatMtxRacy,
   StatMtxFD,
   StatMtxSC,
+  StatMtxScheduler,
   StatMtxGlobalProc,
 
   // This must be the last.

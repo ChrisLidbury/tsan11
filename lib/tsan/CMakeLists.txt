@@ -46,6 +46,7 @@ set(TSAN_SOURCES
   rtl/tsan_rtl_proc.cc
   rtl/tsan_rtl_report.cc
   rtl/tsan_rtl_thread.cc
+  rtl/tsan_schedule.cc
   rtl/tsan_stack_trace.cc
   rtl/tsan_stat.cc
   rtl/tsan_suppressions.cc
@@ -88,6 +89,7 @@ set(TSAN_HEADERS
   rtl/tsan_relaxed.h
   rtl/tsan_report.h
   rtl/tsan_rtl.h
+  rtl/tsan_schedule.h
   rtl/tsan_stack_trace.h
   rtl/tsan_stat.h
   rtl/tsan_suppressions.h
