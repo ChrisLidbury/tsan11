@@ -6,6 +6,7 @@
 
 #include "tsan_clock.h"
 #include "tsan_rtl.h"
+#include "tsan_schedule.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 
 namespace __tsan {
@@ -292,7 +293,8 @@ bool StoreBuffer::FetchStore(ThreadState *thr, u64 *val, SyncClock **clock,
   // For now, just read the earliest (+0 with 50% prob, +1 with 25%, ...).
   while (limit != 0 &&
          ((is_sc_access && limit->is_sc_access_ && limit != last_sc_store) ||
-         (rdtsc() & 4)))
+//         (rdtsc() & 4)))
+         (ctx->scheduler.RandomNext(thr, Scheduler::READ) & 1)))
     limit = limit->next_;
   if (limit == 0) {
     pos_[thr->tid] = last_pos_ + 1;

@@ -1,5 +1,7 @@
 #include "tsan_schedule.h"
 
+#include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_libc.h"
 #include "tsan_mutex.h"
 #include "tsan_rtl.h"
 
@@ -14,18 +16,67 @@ static inline u64 rdtsc() {
                 "or %%rdx,%%rax"   // and or onto rax
                 : "=a"(ret)        // output to tsc
                 :
-                : "%rcx", "%rdx", "memory"); // rcx and rdx are clobbered
-                                             // memory to prevent reordering
+                : "%rcx", "%rdx", "memory");  // rcx and rdx are clobbered
+                                              // memory to prevent reordering
   return ret;
 }
 
-// TODO change mutex stat type
-Scheduler::Scheduler() : mtx(MutexTypeSchedule, StatMtxTotal) {
+// Very fast PRNG. Must be seeded using the rdtsc unless a seed is provided.
+// Borrowed from wiki.
+u64 s[2];
+u64 xorshift128plus() {
+  u64 x = s[0];
+  const u64 y = s[1];
+  s[0] = y;
+  x ^= x << 23;  // a
+  s[1] = x ^ y ^ (x >> 17) ^ (y >> 26);  // b, c
+  return s[1] + y;
+}
+
+Scheduler::Scheduler()
+    : tick_(0), mtx(MutexTypeSchedule, StatMtxTotal), last_free_idx_(0) {
   internal_memset(cond_vars_, kInactive, sizeof(cond_vars_));
-  last_free_idx_ = 0;
+  internal_memset(thread_status_, FINISHED, sizeof(thread_status_));
+}
+
+Scheduler::~Scheduler() {
+  if (record_fd_ != kInvalidFd)
+    WriteToFile(record_fd_, "0 0 0", internal_strlen("0 0 0"));
+}
+
+// Assume this is the only scheduler.
+void Scheduler::Initialise() {
   // Setup start thread.
   // This thread will still call NewThread, so do not adjust last_free_idx_.
   atomic_store(&cond_vars_[0], kActive, memory_order_relaxed);
+  // Assumes ownership of PRNG buffer. Can make a member if multiple schedulers.
+  s[0] = rdtsc();
+  s[1] = rdtsc();
+
+  // Set up demo playback.
+  event_type_ = END;
+  if (flags()->play_demo && flags()->play_demo[0]) {
+    uptr buffer_size;
+    uptr contents_size;
+    CHECK(ReadFileToBuffer(flags()->play_demo, &demo_contents_, &buffer_size, &contents_size));
+    CHECK(demo_contents_[0] != 0);
+    s[0] = internal_simple_strtoll(demo_contents_, &demo_contents_, 10);
+    CHECK(demo_contents_[0] != 0);
+    s[1] = internal_simple_strtoll(demo_contents_, &demo_contents_, 10);
+    DemoNext();
+  }
+  record_fd_ = kInvalidFd;
+  if (flags()->record_demo && flags()->record_demo[0]) {
+    record_fd_ = OpenFile(flags()->record_demo, WrOnly);
+    InternalScopedBuffer<char> buf(128);
+    internal_snprintf(buf.data(), buf.size(), "%llu %llu\n", s[0], s[1]);
+    WriteToFile(record_fd_, buf.data(), internal_strlen(buf.data()));
+  }
+}
+
+u64 Scheduler::RandomNumber() {
+  // Reading from file only supports s64, not u64. So the MSB must be 0.
+  return xorshift128plus() >> 1;
 }
 
 // Current thr must be active.
@@ -38,12 +89,12 @@ void Scheduler::Tick(ThreadState *thr) {
       atomic_compare_exchange_strong(&cond_vars_[thr->tid],
                                      &cmp, kInactive, memory_order_relaxed);
   CHECK(is_active);
-  if (last_free_idx_ == 0) {
-    atomic_store(&cond_vars_[0], kActive, memory_order_relaxed);
-  } else {
-    int next_active = (rdtsc() >> 2) % last_free_idx_;
-    atomic_store(&cond_vars_[cond_vars_idx_[next_active]], kActive, memory_order_relaxed);
-  }
+  int next_tid = RandomNext(thr, SCHEDULE);
+  next_tid = last_free_idx_ == 0 ? 0 :
+      cond_vars_idx_[RandomNext(thr, SCHEDULE) % last_free_idx_];
+  CHECK(thread_status_[next_tid] == RUNNING ||
+      (next_tid == 0 && last_free_idx_ == 0));
+  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
   mtx.Unlock();
 }
 
@@ -61,8 +112,7 @@ void Scheduler::Wait(ThreadState *thr) {
 void Scheduler::NewThread(ThreadState *thr, int tid) {
   Wait(thr);
   mtx.Lock();
-  cond_vars_idx_[last_free_idx_] = tid;
-  cond_vars_idx_inv_[tid] = last_free_idx_++;
+  Enable(tid);
   if (thr->tid != tid)
     atomic_store(&cond_vars_[tid], kInactive, memory_order_relaxed);
   mtx.Unlock();
@@ -71,35 +121,83 @@ void Scheduler::NewThread(ThreadState *thr, int tid) {
 
 // Replace this threads position in the last with the last.
 // Mark the one past the end as active so this thread can tick.
+// Wakes up parent thread if it is waiting for this thread to finish.
 void Scheduler::DeleteThread(ThreadState *thr) {
-  // There isn't an easy way to do this without the mutex.
   Wait(thr);
   mtx.Lock();
-  int tid_last_idx = cond_vars_idx_[--last_free_idx_];
-  cond_vars_idx_[cond_vars_idx_inv_[thr->tid]] = tid_last_idx;
-  cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[thr->tid];
+  Disable(thr->tid);
+  thread_status_[thr->tid] = FINISHED;
+  int ptid = thr->tctx->parent_tid;
+  if (thread_status_[ptid] != RUNNING && wait_tid_[ptid] == thr->tid) {
+    CHECK(thread_status_[ptid] != FINISHED);
+    Enable(ptid);
+  }
   mtx.Unlock();
   Tick(thr);
 }
 
-// This will typically wake up immediately after its child thread has called
-// DeleteThread and Tick.
-// TODO This causes non-determinism due to lack of Wait and Tick.
-void Scheduler::Enable(ThreadState *thr) {
-  mtx.Lock();
-  cond_vars_idx_[last_free_idx_] = thr->tid;
-  cond_vars_idx_inv_[thr->tid] = last_free_idx_++;
-  mtx.Unlock();
-}
-
-void Scheduler::Disable(ThreadState *thr) {
+// Disables itself if the joining thread is not finished.
+void Scheduler::JoinThread(ThreadState *thr, int join_tid) {
   Wait(thr);
   mtx.Lock();
-  int tid_last_idx = cond_vars_idx_[--last_free_idx_];
-  cond_vars_idx_[cond_vars_idx_inv_[thr->tid]] = tid_last_idx;
-  cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[thr->tid];
+  if (thread_status_[join_tid] != FINISHED) {
+    Disable(thr->tid);
+    wait_tid_[thr->tid] = join_tid;
+  }
   mtx.Unlock();
   Tick(thr);
+}
+
+// random -> play_demo -> record_demo
+u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
+  u64 return_param = RandomNumber();  // Optional.
+  // Read from demo file.
+  if (event_type_ != END && demo_tick_ == tick_) {
+    CHECK(event_type == event_type_);
+    return_param = event_param_;
+    // Just for the thread scheduler, lets us analyse the demo file.
+    if (event_type == SCHEDULE) {
+      return_param = cond_vars_idx_inv_[event_param_];
+    }
+    DemoNext();
+  }
+  // Write to demo file.
+  if (record_fd_ != kInvalidFd) {
+    u64 record_param = return_param;
+    if (event_type == SCHEDULE) {
+      record_param = cond_vars_idx_[record_param % last_free_idx_];
+    }
+    InternalScopedBuffer<char> buf(128);
+    internal_snprintf(buf.data(), buf.size(),
+        "%llu %llu %llu\n", tick_, event_type, /*return_param*/ record_param);
+    WriteToFile(record_fd_, buf.data(), internal_strlen(buf.data()));
+  }
+  ++tick_;
+  return return_param;
+}
+
+// Called by DeleteThread to enable the parent thread if necessary.
+// Parent thread will automatically wake up when the child finishes.
+void Scheduler::Enable(int tid) {
+  cond_vars_idx_[last_free_idx_] = tid;
+  cond_vars_idx_inv_[tid] = last_free_idx_++;
+  thread_status_[tid] = RUNNING;
+}
+
+// Called by JoinThread to disable if child has not yet finished.
+void Scheduler::Disable(int tid) {
+  int tid_last_idx = cond_vars_idx_[--last_free_idx_];
+  cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
+  cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
+  thread_status_[tid] = DISABLED;
+}
+
+void Scheduler::DemoNext() {
+  demo_tick_ = internal_simple_strtoll(demo_contents_, &demo_contents_, 10);
+  event_type_ =
+      (EventType)internal_simple_strtoll(demo_contents_, &demo_contents_, 10);
+  if (event_type_ != END)
+    event_param_ = internal_simple_strtoll(demo_contents_, &demo_contents_, 10);
 }
 
 // Not yet available.

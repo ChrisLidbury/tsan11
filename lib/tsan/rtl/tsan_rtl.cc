@@ -351,6 +351,7 @@ void Initialize(ThreadState *thr) {
   InitializeAllocator();
   ReplaceSystemMalloc();
 #endif
+  ctx->scheduler.Initialise();
   if (common_flags()->detect_deadlocks)
     ctx->dd = DDetector::Create(flags());
   Processor *proc = ProcCreate();
