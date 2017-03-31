@@ -44,6 +44,7 @@ void FdRelease(ThreadState *thr, uptr pc, int fd);
 void FdAccess(ThreadState *thr, uptr pc, int fd);
 void FdClose(ThreadState *thr, uptr pc, int fd, bool write = true);
 void FdFileCreate(ThreadState *thr, uptr pc, int fd);
+void FdFileCreate_(ThreadState *thr, uptr pc, int fd, int re, int rc);
 void FdDup(ThreadState *thr, uptr pc, int oldfd, int newfd, bool write);
 void FdPipeCreate(ThreadState *thr, uptr pc, int rfd, int wfd);
 void FdEventCreate(ThreadState *thr, uptr pc, int fd);

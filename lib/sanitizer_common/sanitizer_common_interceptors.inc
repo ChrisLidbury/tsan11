@@ -40,6 +40,13 @@
 
 #include <stdarg.h>
 
+#define CHECK_FILE_ACCESS 0
+#if CHECK_FILE_ACCESS
+#define FCHECK(X) CHECK(X)
+#else
+#define FCHECK(X)
+#endif
+
 #if SANITIZER_INTERCEPTOR_HOOKS
 #define CALL_WEAK_INTERCEPTOR_HOOK(f, ...)                                     \
   do {                                                                         \
@@ -763,7 +770,7 @@ static void read_iovec(void *ctx, struct __sanitizer_iovec *iovec,
 #endif
 
 #if SANITIZER_INTERCEPT_READ
-INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {
+INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"read");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, read, fd, ptr, count);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -781,7 +788,7 @@ INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {
 #endif
 
 #if SANITIZER_INTERCEPT_PREAD
-INTERCEPTOR(SSIZE_T, pread, int fd, void *ptr, SIZE_T count, OFF_T offset) {
+INTERCEPTOR(SSIZE_T, pread, int fd, void *ptr, SIZE_T count, OFF_T offset) {FCHECK(false&&"pread");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pread, fd, ptr, count, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -799,7 +806,7 @@ INTERCEPTOR(SSIZE_T, pread, int fd, void *ptr, SIZE_T count, OFF_T offset) {
 #endif
 
 #if SANITIZER_INTERCEPT_PREAD64
-INTERCEPTOR(SSIZE_T, pread64, int fd, void *ptr, SIZE_T count, OFF64_T offset) {
+INTERCEPTOR(SSIZE_T, pread64, int fd, void *ptr, SIZE_T count, OFF64_T offset) {FCHECK(false&&"pread64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pread64, fd, ptr, count, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -818,7 +825,7 @@ INTERCEPTOR(SSIZE_T, pread64, int fd, void *ptr, SIZE_T count, OFF64_T offset) {
 
 #if SANITIZER_INTERCEPT_READV
 INTERCEPTOR_WITH_SUFFIX(SSIZE_T, readv, int fd, __sanitizer_iovec *iov,
-                        int iovcnt) {
+                        int iovcnt) {FCHECK(false&&"readv");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readv, fd, iov, iovcnt);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -834,7 +841,7 @@ INTERCEPTOR_WITH_SUFFIX(SSIZE_T, readv, int fd, __sanitizer_iovec *iov,
 
 #if SANITIZER_INTERCEPT_PREADV
 INTERCEPTOR(SSIZE_T, preadv, int fd, __sanitizer_iovec *iov, int iovcnt,
-            OFF_T offset) {
+            OFF_T offset) {FCHECK(false&&"preadv");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, preadv, fd, iov, iovcnt, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -850,7 +857,7 @@ INTERCEPTOR(SSIZE_T, preadv, int fd, __sanitizer_iovec *iov, int iovcnt,
 
 #if SANITIZER_INTERCEPT_PREADV64
 INTERCEPTOR(SSIZE_T, preadv64, int fd, __sanitizer_iovec *iov, int iovcnt,
-            OFF64_T offset) {
+            OFF64_T offset) {FCHECK(false&&"preadv64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, preadv64, fd, iov, iovcnt, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -865,7 +872,7 @@ INTERCEPTOR(SSIZE_T, preadv64, int fd, __sanitizer_iovec *iov, int iovcnt,
 #endif
 
 #if SANITIZER_INTERCEPT_WRITE
-INTERCEPTOR(SSIZE_T, write, int fd, void *ptr, SIZE_T count) {
+INTERCEPTOR(SSIZE_T, write, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"write");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, write, fd, ptr, count);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -881,7 +888,7 @@ INTERCEPTOR(SSIZE_T, write, int fd, void *ptr, SIZE_T count) {
 #endif
 
 #if SANITIZER_INTERCEPT_PWRITE
-INTERCEPTOR(SSIZE_T, pwrite, int fd, void *ptr, SIZE_T count, OFF_T offset) {
+INTERCEPTOR(SSIZE_T, pwrite, int fd, void *ptr, SIZE_T count, OFF_T offset) {FCHECK(false&&"pwrite");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pwrite, fd, ptr, count, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -897,7 +904,7 @@ INTERCEPTOR(SSIZE_T, pwrite, int fd, void *ptr, SIZE_T count, OFF_T offset) {
 
 #if SANITIZER_INTERCEPT_PWRITE64
 INTERCEPTOR(SSIZE_T, pwrite64, int fd, void *ptr, OFF64_T count,
-            OFF64_T offset) {
+            OFF64_T offset) {FCHECK(false&&"pwrite64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pwrite64, fd, ptr, count, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -913,7 +920,7 @@ INTERCEPTOR(SSIZE_T, pwrite64, int fd, void *ptr, OFF64_T count,
 
 #if SANITIZER_INTERCEPT_WRITEV
 INTERCEPTOR_WITH_SUFFIX(SSIZE_T, writev, int fd, __sanitizer_iovec *iov,
-                        int iovcnt) {
+                        int iovcnt) {FCHECK(false&&"writev");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, writev, fd, iov, iovcnt);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -929,7 +936,7 @@ INTERCEPTOR_WITH_SUFFIX(SSIZE_T, writev, int fd, __sanitizer_iovec *iov,
 
 #if SANITIZER_INTERCEPT_PWRITEV
 INTERCEPTOR(SSIZE_T, pwritev, int fd, __sanitizer_iovec *iov, int iovcnt,
-            OFF_T offset) {
+            OFF_T offset) {FCHECK(false&&"pwritev");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pwritev, fd, iov, iovcnt, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -945,7 +952,7 @@ INTERCEPTOR(SSIZE_T, pwritev, int fd, __sanitizer_iovec *iov, int iovcnt,
 
 #if SANITIZER_INTERCEPT_PWRITEV64
 INTERCEPTOR(SSIZE_T, pwritev64, int fd, __sanitizer_iovec *iov, int iovcnt,
-            OFF64_T offset) {
+            OFF64_T offset) {FCHECK(false&&"pwritev64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pwritev64, fd, iov, iovcnt, offset);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -1443,7 +1450,7 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_snprintf, __isoc99_vsnprintf, str, size,
 
 #if SANITIZER_INTERCEPT_IOCTL
 #include "sanitizer_common_interceptors_ioctl.inc"
-INTERCEPTOR(int, ioctl, int d, unsigned long request, ...) {
+INTERCEPTOR(int, ioctl, int d, unsigned long request, ...) {FCHECK(false&&"ioctl");
   // We need a frame pointer, because we call into ioctl_common_[pre|post] which
   // can trigger a report and we need to be able to unwind through this
   // function.  On Mac in debug mode we might not have a frame pointer, because
@@ -1925,7 +1932,7 @@ static const __sanitizer_glob_t kGlobCopy = {
 
 INTERCEPTOR(int, glob, const char *pattern, int flags,
             int (*errfunc)(const char *epath, int eerrno),
-            __sanitizer_glob_t *pglob) {
+            __sanitizer_glob_t *pglob) {FCHECK(false&&"glob");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, glob, pattern, flags, errfunc, pglob);
   COMMON_INTERCEPTOR_READ_STRING(ctx, pattern, 0);
@@ -1954,7 +1961,7 @@ INTERCEPTOR(int, glob, const char *pattern, int flags,
 
 INTERCEPTOR(int, glob64, const char *pattern, int flags,
             int (*errfunc)(const char *epath, int eerrno),
-            __sanitizer_glob_t *pglob) {
+            __sanitizer_glob_t *pglob) {FCHECK(false&&"glob64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, glob64, pattern, flags, errfunc, pglob);
   COMMON_INTERCEPTOR_READ_STRING(ctx, pattern, 0);
@@ -2164,7 +2171,7 @@ INTERCEPTOR(int, pthread_getschedparam, uptr thread, int *policy, int *param) {
 #if SANITIZER_INTERCEPT_GETADDRINFO
 INTERCEPTOR(int, getaddrinfo, char *node, char *service,
             struct __sanitizer_addrinfo *hints,
-            struct __sanitizer_addrinfo **out) {
+            struct __sanitizer_addrinfo **out) {FCHECK(false&&"getaddrinfo");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getaddrinfo, node, service, hints, out);
   if (node) COMMON_INTERCEPTOR_READ_RANGE(ctx, node, REAL(strlen)(node) + 1);
@@ -2198,7 +2205,7 @@ INTERCEPTOR(int, getaddrinfo, char *node, char *service,
 
 #if SANITIZER_INTERCEPT_GETNAMEINFO
 INTERCEPTOR(int, getnameinfo, void *sockaddr, unsigned salen, char *host,
-            unsigned hostlen, char *serv, unsigned servlen, int flags) {
+            unsigned hostlen, char *serv, unsigned servlen, int flags) {FCHECK(false&&"getnameinfo");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getnameinfo, sockaddr, salen, host, hostlen,
                            serv, servlen, flags);
@@ -2223,7 +2230,7 @@ INTERCEPTOR(int, getnameinfo, void *sockaddr, unsigned salen, char *host,
 #endif
 
 #if SANITIZER_INTERCEPT_GETSOCKNAME
-INTERCEPTOR(int, getsockname, int sock_fd, void *addr, int *addrlen) {
+INTERCEPTOR(int, getsockname, int sock_fd, void *addr, int *addrlen) {FCHECK(false&&"getsockname");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getsockname, sock_fd, addr, addrlen);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, addrlen, sizeof(*addrlen));
@@ -2265,7 +2272,7 @@ static void write_hostent(void *ctx, struct __sanitizer_hostent *h) {
 #endif
 
 #if SANITIZER_INTERCEPT_GETHOSTBYNAME
-INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname, char *name) {
+INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname, char *name) {FCHECK(false&&"gethostbyname");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyname, name);
   struct __sanitizer_hostent *res = REAL(gethostbyname)(name);
@@ -2274,7 +2281,7 @@ INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname, char *name) {
 }
 
 INTERCEPTOR(struct __sanitizer_hostent *, gethostbyaddr, void *addr, int len,
-            int type) {
+            int type) {FCHECK(false&&"gethostbyaddr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyaddr, addr, len, type);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, addr, len);
@@ -2283,7 +2290,7 @@ INTERCEPTOR(struct __sanitizer_hostent *, gethostbyaddr, void *addr, int len,
   return res;
 }
 
-INTERCEPTOR(struct __sanitizer_hostent *, gethostent, int fake) {
+INTERCEPTOR(struct __sanitizer_hostent *, gethostent, int fake) {FCHECK(false&&"gethostent");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostent, fake);
   struct __sanitizer_hostent *res = REAL(gethostent)(fake);
@@ -2291,7 +2298,7 @@ INTERCEPTOR(struct __sanitizer_hostent *, gethostent, int fake) {
   return res;
 }
 
-INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname2, char *name, int af) {
+INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname2, char *name, int af) {FCHECK(false&&"gethostbyname2");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyname2, name, af);
   struct __sanitizer_hostent *res = REAL(gethostbyname2)(name, af);
@@ -2310,7 +2317,7 @@ INTERCEPTOR(struct __sanitizer_hostent *, gethostbyname2, char *name, int af) {
 #if SANITIZER_INTERCEPT_GETHOSTBYNAME_R
 INTERCEPTOR(int, gethostbyname_r, char *name, struct __sanitizer_hostent *ret,
             char *buf, SIZE_T buflen, __sanitizer_hostent **result,
-            int *h_errnop) {
+            int *h_errnop) {FCHECK(false&&"gethostbyname_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyname_r, name, ret, buf, buflen, result,
                            h_errnop);
@@ -2333,7 +2340,7 @@ INTERCEPTOR(int, gethostbyname_r, char *name, struct __sanitizer_hostent *ret,
 
 #if SANITIZER_INTERCEPT_GETHOSTENT_R
 INTERCEPTOR(int, gethostent_r, struct __sanitizer_hostent *ret, char *buf,
-            SIZE_T buflen, __sanitizer_hostent **result, int *h_errnop) {
+            SIZE_T buflen, __sanitizer_hostent **result, int *h_errnop) {FCHECK(false&&"gethostent_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostent_r, ret, buf, buflen, result,
                            h_errnop);
@@ -2358,7 +2365,7 @@ INTERCEPTOR(int, gethostent_r, struct __sanitizer_hostent *ret, char *buf,
 #if SANITIZER_INTERCEPT_GETHOSTBYADDR_R
 INTERCEPTOR(int, gethostbyaddr_r, void *addr, int len, int type,
             struct __sanitizer_hostent *ret, char *buf, SIZE_T buflen,
-            __sanitizer_hostent **result, int *h_errnop) {
+            __sanitizer_hostent **result, int *h_errnop) {FCHECK(false&&"gethostbyaddr_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyaddr_r, addr, len, type, ret, buf,
                            buflen, result, h_errnop);
@@ -2385,7 +2392,7 @@ INTERCEPTOR(int, gethostbyaddr_r, void *addr, int len, int type,
 #if SANITIZER_INTERCEPT_GETHOSTBYNAME2_R
 INTERCEPTOR(int, gethostbyname2_r, char *name, int af,
             struct __sanitizer_hostent *ret, char *buf, SIZE_T buflen,
-            __sanitizer_hostent **result, int *h_errnop) {
+            __sanitizer_hostent **result, int *h_errnop) {FCHECK(false&&"gethostbyname2_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, gethostbyname2_r, name, af, ret, buf, buflen,
                            result, h_errnop);
@@ -2410,7 +2417,7 @@ INTERCEPTOR(int, gethostbyname2_r, char *name, int af,
 
 #if SANITIZER_INTERCEPT_GETSOCKOPT
 INTERCEPTOR(int, getsockopt, int sockfd, int level, int optname, void *optval,
-            int *optlen) {
+            int *optlen) {FCHECK(false&&"getsockopt");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getsockopt, sockfd, level, optname, optval,
                            optlen);
@@ -2429,7 +2436,7 @@ INTERCEPTOR(int, getsockopt, int sockfd, int level, int optname, void *optval,
 #endif
 
 #if SANITIZER_INTERCEPT_ACCEPT
-INTERCEPTOR(int, accept, int fd, void *addr, unsigned *addrlen) {
+INTERCEPTOR(int, accept, int fd, void *addr, unsigned *addrlen) {FCHECK(false&&"accept");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, accept, fd, addr, addrlen);
   unsigned addrlen0 = 0;
@@ -2451,7 +2458,7 @@ INTERCEPTOR(int, accept, int fd, void *addr, unsigned *addrlen) {
 #endif
 
 #if SANITIZER_INTERCEPT_ACCEPT4
-INTERCEPTOR(int, accept4, int fd, void *addr, unsigned *addrlen, int f) {
+INTERCEPTOR(int, accept4, int fd, void *addr, unsigned *addrlen, int f) {FCHECK(false&&"accept4");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, accept4, fd, addr, addrlen, f);
   unsigned addrlen0 = 0;
@@ -2535,7 +2542,7 @@ static void write_msghdr(void *ctx, struct __sanitizer_msghdr *msg,
 }
 
 INTERCEPTOR(SSIZE_T, recvmsg, int fd, struct __sanitizer_msghdr *msg,
-            int flags) {
+            int flags) {FCHECK(false&&"recvmsg");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, recvmsg, fd, msg, flags);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -2608,7 +2615,7 @@ static void read_msghdr(void *ctx, struct __sanitizer_msghdr *msg,
 }
 
 INTERCEPTOR(SSIZE_T, sendmsg, int fd, struct __sanitizer_msghdr *msg,
-            int flags) {
+            int flags) {FCHECK(false&&"sendmsg");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sendmsg, fd, msg, flags);
   if (fd >= 0) {
@@ -2626,7 +2633,7 @@ INTERCEPTOR(SSIZE_T, sendmsg, int fd, struct __sanitizer_msghdr *msg,
 #endif
 
 #if SANITIZER_INTERCEPT_GETPEERNAME
-INTERCEPTOR(int, getpeername, int sockfd, void *addr, unsigned *addrlen) {
+INTERCEPTOR(int, getpeername, int sockfd, void *addr, unsigned *addrlen) {FCHECK(false&&"getpeername");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getpeername, sockfd, addr, addrlen);
   unsigned addr_sz;
@@ -2662,7 +2669,7 @@ INTERCEPTOR(int, sysinfo, void *info) {
 #endif
 
 #if SANITIZER_INTERCEPT_READDIR
-INTERCEPTOR(__sanitizer_dirent *, opendir, const char *path) {
+INTERCEPTOR(__sanitizer_dirent *, opendir, const char *path) {FCHECK(false&&"opendir");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, opendir, path);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -2672,7 +2679,7 @@ INTERCEPTOR(__sanitizer_dirent *, opendir, const char *path) {
   return res;
 }
 
-INTERCEPTOR(__sanitizer_dirent *, readdir, void *dirp) {
+INTERCEPTOR(__sanitizer_dirent *, readdir, void *dirp) {FCHECK(false&&"readdir");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readdir, dirp);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -2684,7 +2691,7 @@ INTERCEPTOR(__sanitizer_dirent *, readdir, void *dirp) {
 }
 
 INTERCEPTOR(int, readdir_r, void *dirp, __sanitizer_dirent *entry,
-            __sanitizer_dirent **result) {
+            __sanitizer_dirent **result) {FCHECK(false&&"readdir_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readdir_r, dirp, entry, result);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -2708,7 +2715,7 @@ INTERCEPTOR(int, readdir_r, void *dirp, __sanitizer_dirent *entry,
 #endif
 
 #if SANITIZER_INTERCEPT_READDIR64
-INTERCEPTOR(__sanitizer_dirent64 *, readdir64, void *dirp) {
+INTERCEPTOR(__sanitizer_dirent64 *, readdir64, void *dirp) {FCHECK(false&&"readdir64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readdir64, dirp);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -2720,7 +2727,7 @@ INTERCEPTOR(__sanitizer_dirent64 *, readdir64, void *dirp) {
 }
 
 INTERCEPTOR(int, readdir64_r, void *dirp, __sanitizer_dirent64 *entry,
-            __sanitizer_dirent64 **result) {
+            __sanitizer_dirent64 **result) {FCHECK(false&&"readdir64_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readdir64_r, dirp, entry, result);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3073,7 +3080,7 @@ INTERCEPTOR(SIZE_T, wcrtomb, char *dest, wchar_t src, void *ps) {
 #endif
 
 #if SANITIZER_INTERCEPT_TCGETATTR
-INTERCEPTOR(int, tcgetattr, int fd, void *termios_p) {
+INTERCEPTOR(int, tcgetattr, int fd, void *termios_p) {FCHECK(false&&"tcgetattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, tcgetattr, fd, termios_p);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3262,7 +3269,7 @@ static int wrapped_scandir_compar(const struct __sanitizer_dirent **a,
 }
 
 INTERCEPTOR(int, scandir, char *dirp, __sanitizer_dirent ***namelist,
-            scandir_filter_f filter, scandir_compar_f compar) {
+            scandir_filter_f filter, scandir_compar_f compar) {FCHECK(false&&"scandir");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, scandir, dirp, namelist, filter, compar);
   if (dirp) COMMON_INTERCEPTOR_READ_RANGE(ctx, dirp, REAL(strlen)(dirp) + 1);
@@ -3315,7 +3322,7 @@ static int wrapped_scandir64_compar(const struct __sanitizer_dirent64 **a,
 }
 
 INTERCEPTOR(int, scandir64, char *dirp, __sanitizer_dirent64 ***namelist,
-            scandir64_filter_f filter, scandir64_compar_f compar) {
+            scandir64_filter_f filter, scandir64_compar_f compar) {FCHECK(false&&"scandir64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, scandir64, dirp, namelist, filter, compar);
   if (dirp) COMMON_INTERCEPTOR_READ_RANGE(ctx, dirp, REAL(strlen)(dirp) + 1);
@@ -3377,7 +3384,7 @@ static void write_pollfd(void *ctx, __sanitizer_pollfd *fds,
 }
 
 INTERCEPTOR(int, poll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
-            int timeout) {
+            int timeout) {FCHECK(false&&"poll");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, poll, fds, nfds, timeout);
   if (fds && nfds) read_pollfd(ctx, fds, nfds);
@@ -3392,7 +3399,7 @@ INTERCEPTOR(int, poll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
 
 #if SANITIZER_INTERCEPT_PPOLL
 INTERCEPTOR(int, ppoll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
-            void *timeout_ts, __sanitizer_sigset_t *sigmask) {
+            void *timeout_ts, __sanitizer_sigset_t *sigmask) {FCHECK(false&&"ppoll");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, ppoll, fds, nfds, timeout_ts, sigmask);
   if (fds && nfds) read_pollfd(ctx, fds, nfds);
@@ -3607,6 +3614,9 @@ INTERCEPTOR(void, _exit, int status) {
 INTERCEPTOR(int, pthread_mutex_lock, void *m) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_lock, m);
+  //
+  COMMON_INTERCEPTOR_MUTEX_LOCK_SCHEDULE(ctx, m);
+  //
   int res = REAL(pthread_mutex_lock)(m);
   if (res == errno_EOWNERDEAD)
     COMMON_INTERCEPTOR_MUTEX_REPAIR(ctx, m);
@@ -3681,7 +3691,7 @@ INTERCEPTOR(__sanitizer_mntent *, getmntent_r, void *fp,
 #endif
 
 #if SANITIZER_INTERCEPT_STATFS
-INTERCEPTOR(int, statfs, char *path, void *buf) {
+INTERCEPTOR(int, statfs, char *path, void *buf) {FCHECK(false&&"statfs");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, statfs, path, buf);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -3692,7 +3702,7 @@ INTERCEPTOR(int, statfs, char *path, void *buf) {
   if (!res) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, struct_statfs_sz);
   return res;
 }
-INTERCEPTOR(int, fstatfs, int fd, void *buf) {
+INTERCEPTOR(int, fstatfs, int fd, void *buf) {FCHECK(false&&"fstatfs");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fstatfs, fd, buf);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3710,7 +3720,7 @@ INTERCEPTOR(int, fstatfs, int fd, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT_STATFS64
-INTERCEPTOR(int, statfs64, char *path, void *buf) {
+INTERCEPTOR(int, statfs64, char *path, void *buf) {FCHECK(false&&"statfs64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, statfs64, path, buf);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -3721,7 +3731,7 @@ INTERCEPTOR(int, statfs64, char *path, void *buf) {
   if (!res) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, struct_statfs64_sz);
   return res;
 }
-INTERCEPTOR(int, fstatfs64, int fd, void *buf) {
+INTERCEPTOR(int, fstatfs64, int fd, void *buf) {FCHECK(false&&"fstatfs64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fstatfs64, fd, buf);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3739,7 +3749,7 @@ INTERCEPTOR(int, fstatfs64, int fd, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT_STATVFS
-INTERCEPTOR(int, statvfs, char *path, void *buf) {
+INTERCEPTOR(int, statvfs, char *path, void *buf) {FCHECK(false&&"statvfs");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, statvfs, path, buf);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -3750,7 +3760,7 @@ INTERCEPTOR(int, statvfs, char *path, void *buf) {
   if (!res) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, struct_statvfs_sz);
   return res;
 }
-INTERCEPTOR(int, fstatvfs, int fd, void *buf) {
+INTERCEPTOR(int, fstatvfs, int fd, void *buf) {FCHECK(false&&"fstatvfs");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fstatvfs, fd, buf);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3768,7 +3778,7 @@ INTERCEPTOR(int, fstatvfs, int fd, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT_STATVFS64
-INTERCEPTOR(int, statvfs64, char *path, void *buf) {
+INTERCEPTOR(int, statvfs64, char *path, void *buf) {FCHECK(false&&"statvfs64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, statvfs64, path, buf);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -3779,7 +3789,7 @@ INTERCEPTOR(int, statvfs64, char *path, void *buf) {
   if (!res) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, struct_statvfs64_sz);
   return res;
 }
-INTERCEPTOR(int, fstatvfs64, int fd, void *buf) {
+INTERCEPTOR(int, fstatvfs64, int fd, void *buf) {FCHECK(false&&"fstatvfs64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fstatvfs64, fd, buf);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -3913,7 +3923,7 @@ INTERCEPTOR(__sanitizer_ether_addr *, ether_aton_r, char *buf,
 #define INIT_ETHER_R
 #endif
 
-#if SANITIZER_INTERCEPT_SHMCTL
+/*#if SANITIZER_INTERCEPT_SHMCTL
 INTERCEPTOR(int, shmctl, int shmid, int cmd, void *buf) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, shmctl, shmid, cmd, buf);
@@ -3934,12 +3944,12 @@ INTERCEPTOR(int, shmctl, int shmid, int cmd, void *buf) {
   return res;
 }
 #define INIT_SHMCTL COMMON_INTERCEPT_FUNCTION(shmctl);
-#else
+#else*/
 #define INIT_SHMCTL
-#endif
+//#endif
 
 #if SANITIZER_INTERCEPT_RANDOM_R
-INTERCEPTOR(int, random_r, void *buf, u32 *result) {
+INTERCEPTOR(int, random_r, void *buf, u32 *result) {FCHECK(false&&"random_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, random_r, buf, result);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4147,7 +4157,7 @@ INTERCEPTOR_PTHREAD_BARRIERATTR_GET(pshared, sizeof(int)) // !mac !android
 #endif
 
 #if SANITIZER_INTERCEPT_TMPNAM
-INTERCEPTOR(char *, tmpnam, char *s) {
+INTERCEPTOR(char *, tmpnam, char *s) {FCHECK(false&&"tmpnam");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, tmpnam, s);
   char *res = REAL(tmpnam)(s);
@@ -4168,7 +4178,7 @@ INTERCEPTOR(char *, tmpnam, char *s) {
 #endif
 
 #if SANITIZER_INTERCEPT_TMPNAM_R
-INTERCEPTOR(char *, tmpnam_r, char *s) {
+INTERCEPTOR(char *, tmpnam_r, char *s) {FCHECK(false&&"tmpnam_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, tmpnam_r, s);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4198,7 +4208,7 @@ INTERCEPTOR(int, ttyname_r, int fd, char *name, SIZE_T namesize) {
 #endif
 
 #if SANITIZER_INTERCEPT_TEMPNAM
-INTERCEPTOR(char *, tempnam, char *dir, char *pfx) {
+INTERCEPTOR(char *, tempnam, char *dir, char *pfx) {FCHECK(false&&"tempnam");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, tempnam, dir, pfx);
   if (dir) COMMON_INTERCEPTOR_READ_RANGE(ctx, dir, REAL(strlen)(dir) + 1);
@@ -4379,7 +4389,7 @@ INTERCEPTOR(long double, lgammal_r, long double x, int *signp) {
 #endif
 
 #if SANITIZER_INTERCEPT_DRAND48_R
-INTERCEPTOR(int, drand48_r, void *buffer, double *result) {
+INTERCEPTOR(int, drand48_r, void *buffer, double *result) {FCHECK(false&&"drand48_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, drand48_r, buffer, result);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4389,7 +4399,7 @@ INTERCEPTOR(int, drand48_r, void *buffer, double *result) {
   if (result) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, result, sizeof(*result));
   return res;
 }
-INTERCEPTOR(int, lrand48_r, void *buffer, long *result) {
+INTERCEPTOR(int, lrand48_r, void *buffer, long *result) {FCHECK(false&&"lrand48_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, lrand48_r, buffer, result);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4407,7 +4417,7 @@ INTERCEPTOR(int, lrand48_r, void *buffer, long *result) {
 #endif
 
 #if SANITIZER_INTERCEPT_RAND_R
-INTERCEPTOR(int, rand_r, unsigned *seedp) {
+INTERCEPTOR(int, rand_r, unsigned *seedp) {FCHECK(false&&"rand_r");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, rand_r, seedp);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, seedp, sizeof(*seedp));
@@ -4419,7 +4429,7 @@ INTERCEPTOR(int, rand_r, unsigned *seedp) {
 #endif
 
 #if SANITIZER_INTERCEPT_GETLINE
-INTERCEPTOR(SSIZE_T, getline, char **lineptr, SIZE_T *n, void *stream) {
+INTERCEPTOR(SSIZE_T, getline, char **lineptr, SIZE_T *n, void *stream) {FCHECK(false&&"getline");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getline, lineptr, n, stream);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4601,7 +4611,7 @@ asm(
 #endif
 
 #if SANITIZER_INTERCEPT_LISTXATTR
-INTERCEPTOR(SSIZE_T, listxattr, const char *path, char *list, SIZE_T size) {
+INTERCEPTOR(SSIZE_T, listxattr, const char *path, char *list, SIZE_T size) {FCHECK(false&&"listxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, listxattr, path, list, size);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -4614,7 +4624,7 @@ INTERCEPTOR(SSIZE_T, listxattr, const char *path, char *list, SIZE_T size) {
   if (size && res > 0 && list) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, list, res);
   return res;
 }
-INTERCEPTOR(SSIZE_T, llistxattr, const char *path, char *list, SIZE_T size) {
+INTERCEPTOR(SSIZE_T, llistxattr, const char *path, char *list, SIZE_T size) {FCHECK(false&&"llistxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, llistxattr, path, list, size);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -4625,7 +4635,7 @@ INTERCEPTOR(SSIZE_T, llistxattr, const char *path, char *list, SIZE_T size) {
   if (size && res > 0 && list) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, list, res);
   return res;
 }
-INTERCEPTOR(SSIZE_T, flistxattr, int fd, char *list, SIZE_T size) {
+INTERCEPTOR(SSIZE_T, flistxattr, int fd, char *list, SIZE_T size) {FCHECK(false&&"flistxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, flistxattr, fd, list, size);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4645,7 +4655,7 @@ INTERCEPTOR(SSIZE_T, flistxattr, int fd, char *list, SIZE_T size) {
 
 #if SANITIZER_INTERCEPT_GETXATTR
 INTERCEPTOR(SSIZE_T, getxattr, const char *path, const char *name, char *value,
-            SIZE_T size) {
+            SIZE_T size) {FCHECK(false&&"getxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getxattr, path, name, value, size);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -4658,7 +4668,7 @@ INTERCEPTOR(SSIZE_T, getxattr, const char *path, const char *name, char *value,
   return res;
 }
 INTERCEPTOR(SSIZE_T, lgetxattr, const char *path, const char *name, char *value,
-            SIZE_T size) {
+            SIZE_T size) {FCHECK(false&&"lgetxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, lgetxattr, path, name, value, size);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -4671,7 +4681,7 @@ INTERCEPTOR(SSIZE_T, lgetxattr, const char *path, const char *name, char *value,
   return res;
 }
 INTERCEPTOR(SSIZE_T, fgetxattr, int fd, const char *name, char *value,
-            SIZE_T size) {
+            SIZE_T size) {FCHECK(false&&"fgetxattr");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fgetxattr, fd, name, value, size);
   if (name) COMMON_INTERCEPTOR_READ_RANGE(ctx, name, REAL(strlen)(name) + 1);
@@ -5145,17 +5155,19 @@ INTERCEPTOR(int, __woverflow, __sanitizer_FILE *fp, int ch) {
 #endif
 
 #if SANITIZER_INTERCEPT_FOPEN
-INTERCEPTOR(__sanitizer_FILE *, fopen, const char *path, const char *mode) {
+INTERCEPTOR(__sanitizer_FILE *, fopen, const char *path, const char *mode) {//FCHECK(false&&"fopen");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fopen, path, mode);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, mode, REAL(strlen)(mode) + 1);
-  __sanitizer_FILE *res = REAL(fopen)(path, mode);
-  COMMON_INTERCEPTOR_FILE_OPEN(ctx, res, path);
+  //__sanitizer_FILE *res = REAL(fopen)(path, mode);
+  //COMMON_INTERCEPTOR_FILE_OPEN(ctx, res, path);
+  COMMON_INTERCEPTOR_FILE_OPEN_SCHEDULE(ctx, path);
+  //
   if (res) unpoison_file(res);
   return res;
 }
-INTERCEPTOR(__sanitizer_FILE *, fdopen, int fd, const char *mode) {
+INTERCEPTOR(__sanitizer_FILE *, fdopen, int fd, const char *mode) {FCHECK(false&&"fdopen");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fdopen, fd, mode);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, mode, REAL(strlen)(mode) + 1);
@@ -5164,7 +5176,7 @@ INTERCEPTOR(__sanitizer_FILE *, fdopen, int fd, const char *mode) {
   return res;
 }
 INTERCEPTOR(__sanitizer_FILE *, freopen, const char *path, const char *mode,
-            __sanitizer_FILE *fp) {
+            __sanitizer_FILE *fp) {FCHECK(false&&"freopen");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, freopen, path, mode, fp);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -5184,7 +5196,7 @@ INTERCEPTOR(__sanitizer_FILE *, freopen, const char *path, const char *mode,
 #endif
 
 #if SANITIZER_INTERCEPT_FOPEN64
-INTERCEPTOR(__sanitizer_FILE *, fopen64, const char *path, const char *mode) {
+INTERCEPTOR(__sanitizer_FILE *, fopen64, const char *path, const char *mode) {FCHECK(false&&"fopen64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fopen64, path, mode);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -5195,7 +5207,7 @@ INTERCEPTOR(__sanitizer_FILE *, fopen64, const char *path, const char *mode) {
   return res;
 }
 INTERCEPTOR(__sanitizer_FILE *, freopen64, const char *path, const char *mode,
-            __sanitizer_FILE *fp) {
+            __sanitizer_FILE *fp) {FCHECK(false&&"freopen64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, freopen64, path, mode, fp);
   if (path) COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
@@ -5214,7 +5226,7 @@ INTERCEPTOR(__sanitizer_FILE *, freopen64, const char *path, const char *mode,
 #endif
 
 #if SANITIZER_INTERCEPT_OPEN_MEMSTREAM
-INTERCEPTOR(__sanitizer_FILE *, open_memstream, char **ptr, SIZE_T *sizeloc) {
+INTERCEPTOR(__sanitizer_FILE *, open_memstream, char **ptr, SIZE_T *sizeloc) {FCHECK(false&&"open_memstream");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, open_memstream, ptr, sizeloc);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -5231,7 +5243,7 @@ INTERCEPTOR(__sanitizer_FILE *, open_memstream, char **ptr, SIZE_T *sizeloc) {
   return res;
 }
 INTERCEPTOR(__sanitizer_FILE *, open_wmemstream, wchar_t **ptr,
-            SIZE_T *sizeloc) {
+            SIZE_T *sizeloc) {FCHECK(false&&"open_wmemstream");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, open_wmemstream, ptr, sizeloc);
   __sanitizer_FILE *res = REAL(open_wmemstream)(ptr, sizeloc);
@@ -5245,7 +5257,7 @@ INTERCEPTOR(__sanitizer_FILE *, open_wmemstream, wchar_t **ptr,
   return res;
 }
 INTERCEPTOR(__sanitizer_FILE *, fmemopen, void *buf, SIZE_T size,
-            const char *mode) {
+            const char *mode) {FCHECK(false&&"fmemopen");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fmemopen, buf, size, mode);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -5307,7 +5319,7 @@ INTERCEPTOR(void, _obstack_newchunk, __sanitizer_obstack *obstack, int length) {
 #endif
 
 #if SANITIZER_INTERCEPT_FFLUSH
-INTERCEPTOR(int, fflush, __sanitizer_FILE *fp) {
+INTERCEPTOR(int, fflush, __sanitizer_FILE *fp) {FCHECK(false&&"fflush");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fflush, fp);
   int res = REAL(fflush)(fp);
@@ -5324,10 +5336,11 @@ INTERCEPTOR(int, fflush, __sanitizer_FILE *fp) {
 #endif
 
 #if SANITIZER_INTERCEPT_FCLOSE
-INTERCEPTOR(int, fclose, __sanitizer_FILE *fp) {
+INTERCEPTOR(int, fclose, __sanitizer_FILE *fp) {FCHECK(false&&"fclose");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fclose, fp);
-  COMMON_INTERCEPTOR_FILE_CLOSE(ctx, fp);
+  //COMMON_INTERCEPTOR_FILE_CLOSE(ctx, fp);
+  COMMON_INTERCEPTOR_FILE_CLOSE_SCHEDULE(ctx, fp);
   const FileMetadata *m = GetInterceptorMetadata(fp);
   int res = REAL(fclose)(fp);
   if (m) {
@@ -5367,7 +5380,7 @@ INTERCEPTOR(int, dlclose, void *handle) {
 #endif
 
 #if SANITIZER_INTERCEPT_GETPASS
-INTERCEPTOR(char *, getpass, const char *prompt) {
+INTERCEPTOR(char *, getpass, const char *prompt) {FCHECK(false&&"getpass");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, getpass, prompt);
   if (prompt)
@@ -5384,7 +5397,7 @@ INTERCEPTOR(char *, getpass, const char *prompt) {
 
 #if SANITIZER_INTERCEPT_TIMERFD
 INTERCEPTOR(int, timerfd_settime, int fd, int flags, void *new_value,
-            void *old_value) {
+            void *old_value) {FCHECK(false&&"timerfd_settime");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, timerfd_settime, fd, flags, new_value,
                            old_value);
@@ -5395,7 +5408,7 @@ INTERCEPTOR(int, timerfd_settime, int fd, int flags, void *new_value,
   return res;
 }
 
-INTERCEPTOR(int, timerfd_gettime, int fd, void *curr_value) {
+INTERCEPTOR(int, timerfd_gettime, int fd, void *curr_value) {FCHECK(false&&"timerfd_gettime");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, timerfd_gettime, fd, curr_value);
   int res = REAL(timerfd_gettime)(fd, curr_value);
@@ -5490,7 +5503,7 @@ static int wrapped_close(void *cookie) {
 }
 
 INTERCEPTOR(__sanitizer_FILE *, fopencookie, void *cookie, const char *mode,
-            __sanitizer_cookie_io_functions_t io_funcs) {
+            __sanitizer_cookie_io_functions_t io_funcs) {FCHECK(false&&"fopencookie");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, fopencookie, cookie, mode, io_funcs);
   WrappedCookie *wrapped_cookie =
@@ -5695,7 +5708,7 @@ INTERCEPTOR(char *, ctermid_r, char *s) {
 #endif
 
 #if SANITIZER_INTERCEPT_RECV_RECVFROM
-INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) {
+INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) {FCHECK(false&&"recv");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, recv, fd, buf, len, flags);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -5708,7 +5721,7 @@ INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) {
 }
 
 INTERCEPTOR(SSIZE_T, recvfrom, int fd, void *buf, SIZE_T len, int flags,
-            void *srcaddr, int *addrlen) {
+            void *srcaddr, int *addrlen) {FCHECK(false&&"recvfrom");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, recvfrom, fd, buf, len, flags, srcaddr,
                            addrlen);
@@ -5733,7 +5746,7 @@ INTERCEPTOR(SSIZE_T, recvfrom, int fd, void *buf, SIZE_T len, int flags,
 #endif
 
 #if SANITIZER_INTERCEPT_SEND_SENDTO
-INTERCEPTOR(SSIZE_T, send, int fd, void *buf, SIZE_T len, int flags) {
+INTERCEPTOR(SSIZE_T, send, int fd, void *buf, SIZE_T len, int flags) {FCHECK(false&&"send");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, send, fd, buf, len, flags);
   if (fd >= 0) {
@@ -5747,7 +5760,7 @@ INTERCEPTOR(SSIZE_T, send, int fd, void *buf, SIZE_T len, int flags) {
 }
 
 INTERCEPTOR(SSIZE_T, sendto, int fd, void *buf, SIZE_T len, int flags,
-            void *dstaddr, int addrlen) {
+            void *dstaddr, int addrlen) {FCHECK(false&&"sendto");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sendto, fd, buf, len, flags, dstaddr, addrlen);
   if (fd >= 0) {
@@ -5768,7 +5781,7 @@ INTERCEPTOR(SSIZE_T, sendto, int fd, void *buf, SIZE_T len, int flags,
 #endif
 
 #if SANITIZER_INTERCEPT_EVENTFD_READ_WRITE
-INTERCEPTOR(int, eventfd_read, int fd, u64 *value) {
+INTERCEPTOR(int, eventfd_read, int fd, u64 *value) {FCHECK(false&&"eventfd_read");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, eventfd_read, fd, value);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
@@ -5779,7 +5792,7 @@ INTERCEPTOR(int, eventfd_read, int fd, u64 *value) {
   }
   return res;
 }
-INTERCEPTOR(int, eventfd_write, int fd, u64 value) {
+INTERCEPTOR(int, eventfd_write, int fd, u64 value) {FCHECK(false&&"eventfd_write");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, eventfd_write, fd, value);
   if (fd >= 0) {
@@ -5797,7 +5810,7 @@ INTERCEPTOR(int, eventfd_write, int fd, u64 value) {
 #endif
 
 #if SANITIZER_INTERCEPT_STAT
-INTERCEPTOR(int, stat, const char *path, void *buf) {
+INTERCEPTOR(int, stat, const char *path, void *buf) {FCHECK(false&&"stat");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, stat, path, buf);
   if (common_flags()->intercept_stat)
@@ -5813,7 +5826,7 @@ INTERCEPTOR(int, stat, const char *path, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT___XSTAT
-INTERCEPTOR(int, __xstat, int version, const char *path, void *buf) {
+INTERCEPTOR(int, __xstat, int version, const char *path, void *buf) {FCHECK(false&&"__xstat");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __xstat, version, path, buf);
   if (common_flags()->intercept_stat)
@@ -5829,7 +5842,7 @@ INTERCEPTOR(int, __xstat, int version, const char *path, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT___XSTAT64
-INTERCEPTOR(int, __xstat64, int version, const char *path, void *buf) {
+INTERCEPTOR(int, __xstat64, int version, const char *path, void *buf) {FCHECK(false&&"__xsat64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __xstat64, version, path, buf);
   if (common_flags()->intercept_stat)
@@ -5845,7 +5858,7 @@ INTERCEPTOR(int, __xstat64, int version, const char *path, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT___LXSTAT
-INTERCEPTOR(int, __lxstat, int version, const char *path, void *buf) {
+INTERCEPTOR(int, __lxstat, int version, const char *path, void *buf) {FCHECK(false&&"__lxstat");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __lxstat, version, path, buf);
   if (common_flags()->intercept_stat)
@@ -5861,7 +5874,7 @@ INTERCEPTOR(int, __lxstat, int version, const char *path, void *buf) {
 #endif
 
 #if SANITIZER_INTERCEPT___LXSTAT64
-INTERCEPTOR(int, __lxstat64, int version, const char *path, void *buf) {
+INTERCEPTOR(int, __lxstat64, int version, const char *path, void *buf) {FCHECK(false&&"__lxstat64");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __lxstat64, version, path, buf);
   if (common_flags()->intercept_stat)

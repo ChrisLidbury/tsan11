@@ -37,6 +37,7 @@ enum MutexType {
   MutexTypeGlobalProc,
   MutexTypeSC,
   MutexTypeSchedule,
+  MutexTypeShmProcess,
 
   // This must be the last.
   MutexTypeCount

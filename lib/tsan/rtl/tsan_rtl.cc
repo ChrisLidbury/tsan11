@@ -219,6 +219,9 @@ static void BackgroundThread(void *arg) {
         atomic_store(&ctx->last_symbolize_time_ns, 0, memory_order_relaxed);
       }
     }
+
+    // Check if scheduler is blocked.
+    ctx->scheduler.Reschedule();
   }
 }
 
@@ -423,6 +426,9 @@ int Finalize(ThreadState *thr) {
 #endif
 
   ThreadFinalize(thr);
+//
+  ctx->scheduler.~Scheduler();
+//
 
   if (ctx->nreported) {
     failed = true;

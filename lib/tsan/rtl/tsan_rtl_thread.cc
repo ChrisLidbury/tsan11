@@ -239,7 +239,7 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
   int tid =
       ctx->thread_registry->CreateThread(uid, detached, parent_tid, &args);
   // Scheduling
-  ctx->scheduler.NewThread(thr, tid);
+  ctx->scheduler.ThreadNew(thr, tid);
   DPrintf("#%d: ThreadCreate tid=%d uid=%zu\n", parent_tid, tid, uid);
   StatSet(thr, StatThreadMaxAlive, ctx->thread_registry->GetMaxAliveThreads());
   return tid;
@@ -299,7 +299,7 @@ void ThreadFinish(ThreadState *thr) {
     DontNeedShadowFor(thr->tls_addr, thr->tls_size);
 
   // Scheduler
-  ctx->scheduler.DeleteThread(thr);
+  ctx->scheduler.ThreadDelete(thr);
 
   thr->is_dead = true;
   ctx->thread_registry->FinishThread(thr->tid);

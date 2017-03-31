@@ -29,6 +29,9 @@ struct FdDesc {
   FdSync *sync;
   int creation_tid;
   u32 creation_stack;
+  // Record and replay descriptors.
+  int record_fd;
+  int replay_fd;
 };
 
 struct FdContext {
@@ -110,6 +113,37 @@ static void init(ThreadState *thr, uptr pc, int fd, FdSync *s,
   }
   d->creation_tid = thr->tid;
   d->creation_stack = CurrentStackId(thr, pc);
+  if (write) {
+    // To catch races between fd usage and open.
+    MemoryRangeImitateWrite(thr, pc, (uptr)d, 8);
+  } else {
+    // See the dup-related comment in FdClose.
+    MemoryRead(thr, pc, (uptr)d, kSizeLog8);
+  }
+}
+
+// pd must be already ref'ed.
+static void init_(ThreadState *thr, uptr pc, int fd, int replay_fd, int record_fd, FdSync *s,
+    bool write = true) {
+  FdDesc *d = fddesc(thr, pc, fd);
+  // As a matter of fact, we don't intercept all close calls.
+  // See e.g. libc __res_iclose().
+  if (d->sync) {
+    unref(thr, pc, d->sync);
+    d->sync = 0;
+  }
+  if (flags()->io_sync == 0) {
+    unref(thr, pc, s);
+  } else if (flags()->io_sync == 1) {
+    d->sync = s;
+  } else if (flags()->io_sync == 2) {
+    unref(thr, pc, s);
+    d->sync = &fdctx.globsync;
+  }
+  d->creation_tid = thr->tid;
+  d->creation_stack = CurrentStackId(thr, pc);
+  d->replay_fd = replay_fd;
+  d->record_fd = record_fd;
   if (write) {
     // To catch races between fd usage and open.
     MemoryRangeImitateWrite(thr, pc, (uptr)d, 8);
@@ -220,6 +254,13 @@ void FdFileCreate(ThreadState *thr, uptr pc, int fd) {
   if (bogusfd(fd))
     return;
   init(thr, pc, fd, &fdctx.filesync);
+}
+
+void FdFileCreate_(ThreadState *thr, uptr pc, int fd, int replay_fd, int record_fd) {
+  DPrintf("#%d: FdFileCreate(%d)\n", thr->tid, fd);
+  if (bogusfd(fd))
+    return;
+  init_(thr, pc, fd, replay_fd, record_fd, &fdctx.filesync);
 }
 
 void FdDup(ThreadState *thr, uptr pc, int oldfd, int newfd, bool write) {
