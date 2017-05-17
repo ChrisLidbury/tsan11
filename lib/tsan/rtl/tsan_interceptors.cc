@@ -35,9 +35,9 @@
 
 using namespace __tsan;  // NOLINT
 
-#define CHECK_FILE_ACCESS 0
+#define CHECK_FILE_ACCESS 1
 #if CHECK_FILE_ACCESS
-#define FCHECK(X) CHECK(X)
+#define FCHECK(X) Printf("File function: %s\n", #X);
 #else
 #define FCHECK(X)
 #endif
@@ -351,21 +351,21 @@ struct BlockingCall {
   ThreadSignalContext *ctx;
 };
 
-TSAN_INTERCEPTOR(unsigned, sleep, unsigned sec) {
+TSAN_INTERCEPTOR(unsigned, sleep, unsigned sec) {FCHECK(false&&"sleep");
   SCOPED_TSAN_INTERCEPTOR(sleep, sec);
   unsigned res = BLOCK_REAL(sleep)(sec);
   AfterSleep(thr, pc);
   return res;
 }
 
-TSAN_INTERCEPTOR(int, usleep, long_t usec) {
+TSAN_INTERCEPTOR(int, usleep, long_t usec) {FCHECK(false&&"usleep");
   SCOPED_TSAN_INTERCEPTOR(usleep, usec);
   int res = BLOCK_REAL(usleep)(usec);
   AfterSleep(thr, pc);
   return res;
 }
 
-TSAN_INTERCEPTOR(int, nanosleep, void *req, void *rem) {
+TSAN_INTERCEPTOR(int, nanosleep, void *req, void *rem) {FCHECK(false&&"nanosleep");
   SCOPED_TSAN_INTERCEPTOR(nanosleep, req, rem);
   int res = BLOCK_REAL(nanosleep)(req, rem);
   AfterSleep(thr, pc);
@@ -1572,6 +1572,7 @@ TSAN_INTERCEPTOR(int, inotify_init1, int flags) {FCHECK(false&&"inotify_init1");
 TSAN_INTERCEPTOR(int, socket, int domain, int type, int protocol) {FCHECK(false&&"socket");
   SCOPED_TSAN_INTERCEPTOR(socket, domain, type, protocol);
   int fd = REAL(socket)(domain, type, protocol);
+  //__tsan::ctx->scheduler.SyscallSocket(&fd, domain, type, protocol);
   if (fd >= 0)
     FdSocketCreate(thr, pc, fd);
   return fd;
@@ -1585,10 +1586,12 @@ TSAN_INTERCEPTOR(int, socketpair, int domain, int type, int protocol, int *fd) {
   return res;
 }
 
-TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {FCHECK(false&&"connect");
+TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {/*FCHECK(false&&"connect");*/Printf("Connect: %s\n", (char*)addr);
   SCOPED_TSAN_INTERCEPTOR(connect, fd, addr, addrlen);
   FdSocketConnecting(thr, pc, fd);
+  //int real_fd = __tsan::ctx->scheduler.SyscallFdMap(fd);
   int res = REAL(connect)(fd, addr, addrlen);
+  __tsan::ctx->scheduler.SyscallConnect(&res, fd, addr, addrlen);
   if (res == 0 && fd >= 0)
     FdSocketConnect(thr, pc, fd);
   return res;
@@ -1608,6 +1611,15 @@ TSAN_INTERCEPTOR(int, listen, int fd, int backlog) {FCHECK(false&&"listen");
   if (fd > 0 && res == 0)
     FdAccess(thr, pc, fd);
   return res;
+}
+
+TSAN_INTERCEPTOR(int, select, int nfds,
+    __sanitizer___kernel_fd_set *readfds,
+    __sanitizer___kernel_fd_set *writefds,
+    __sanitizer___kernel_fd_set *exceptfds,
+    void *timeval) {FCHECK(false&&"select");
+  SCOPED_TSAN_INTERCEPTOR(select, nfds, readfds, writefds, exceptfds, timeval);
+  return REAL(select)(nfds, readfds, writefds, exceptfds, timeval);
 }
 
 TSAN_INTERCEPTOR(int, close, int fd) {FCHECK(false&&"close");
@@ -1840,6 +1852,13 @@ namespace __tsan {
 
 static void CallUserSignalHandler(ThreadState *thr, bool sync, bool acquire,
     bool sigact, int sig, my_siginfo_t *info, void *uctx) {
+  // In demo replay, check if this is OK.
+  if (!sync) {  // Synchronous signals do not interact with the scheudler.
+    if (!::ctx->scheduler.SignalReceive(thr, sig, false)) {
+      return;
+    }
+  }
+  //
   if (acquire)
     Acquire(thr, 0, (uptr)&sigactions[sig]);
   // Signals are generally asynchronous, so if we receive a signals when
@@ -1900,6 +1919,9 @@ static void CallUserSignalHandler(ThreadState *thr, bool sync, bool acquire,
 }
 
 void ProcessPendingSignals(ThreadState *thr) {
+  // Scheduler call. For replay, check for sending signals.
+  ::ctx->scheduler.SignalPending(thr);
+  //
   ThreadSignalContext *sctx = SigCtx(thr);
   if (sctx == 0 ||
       atomic_load(&sctx->have_pending_signals, memory_order_relaxed) == 0)
@@ -1941,6 +1963,16 @@ void ALWAYS_INLINE rtl_generic_sighandler(bool sigact, int sig,
   }
   // Don't mess with synchronous signals.
   const bool sync = is_sync_signal(sctx, sig);
+
+  // If the signal is processed immediately due to being in a blocking call.
+  //if (!sync && sctx &&
+  //    atomic_load(&sctx->in_blocking_func, memory_order_relaxed)) {
+  //  if (!::ctx->scheduler_.SignalReceive(thr, sig)) {
+  //    return;
+  //  }
+  //}
+  //
+
   if (sync ||
       // If we are in blocking function, we can safely process it now
       // (but check if we are in a recursive interceptor,
@@ -2078,14 +2110,14 @@ TSAN_INTERCEPTOR(int, pthread_kill, void *tid, int sig) {
   return res;
 }
 
-TSAN_INTERCEPTOR(int, gettimeofday, void *tv, void *tz) {
+TSAN_INTERCEPTOR(int, gettimeofday, void *tv, void *tz) {FCHECK(false&&"gettimeofday");
   SCOPED_TSAN_INTERCEPTOR(gettimeofday, tv, tz);
   // It's intercepted merely to process pending signals.
   return REAL(gettimeofday)(tv, tz);
 }
 
 TSAN_INTERCEPTOR(int, getaddrinfo, void *node, void *service,
-    void *hints, void *rv) {
+    void *hints, void *rv) {FCHECK(false&&"getaddrinfo");
   SCOPED_TSAN_INTERCEPTOR(getaddrinfo, node, service, hints, rv);
   // We miss atomic synchronization in getaddrinfo,
   // and can report false race between malloc and free
@@ -2259,15 +2291,16 @@ static void HandleRecvmsg(ThreadState *thr, uptr pc,
   ctx = (void *)&_ctx;                                    \
   (void) ctx;
 
-/*#define COMMON_INTERCEPTOR_FILE_OPEN(ctx, file, path) \
+#define COMMON_INTERCEPTOR_FILE_OPEN(ctx, file, path) \
   Acquire(thr, pc, File2addr(path));                  \
   if (file) {                                         \
     int fd = fileno_unlocked(file);                   \
     if (fd >= 0) FdFileCreate(thr, pc, fd);           \
-  }*/
+  } \
+Printf("%s\n", path);
 
 // Scheduler for file open
-#define COMMON_INTERCEPTOR_FILE_OPEN_SCHEDULE(ctx, path)           \
+/*#define COMMON_INTERCEPTOR_FILE_OPEN_SCHEDULE(ctx, path)           \
   __tsan::ctx->scheduler.Wait(thr);                                \
   __sanitizer_FILE *res = REAL(fopen)(path, mode);                 \
   Acquire(thr, pc, File2addr(path));                               \
@@ -2281,7 +2314,7 @@ static void HandleRecvmsg(ThreadState *thr, uptr pc,
     int fd = fileno_unlocked(res);                                 \
     if (fd >= 0) FdFileCreate_(thr, pc, fd, replay_fd, record_fd);  \
   }                                                                \
-  __tsan::ctx->scheduler.Tick(thr);
+  __tsan::ctx->scheduler.Tick(thr);*/
 
 #define COMMON_INTERCEPTOR_FILE_CLOSE(ctx, file) \
   if (file) {                                    \
@@ -2655,6 +2688,7 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(connect);
   TSAN_INTERCEPT(bind);
   TSAN_INTERCEPT(listen);
+  TSAN_INTERCEPT(select);
   TSAN_MAYBE_INTERCEPT_EPOLL;
   TSAN_INTERCEPT(close);
   TSAN_MAYBE_INTERCEPT___CLOSE;

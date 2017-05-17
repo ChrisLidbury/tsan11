@@ -3,8 +3,20 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
+#include "sanitizer_common/sanitizer_platform_limits_posix.h"
+//#include "sanitizer_common/sanitizer_posix.h"  // For internal_lseek
 #include "tsan_mutex.h"
 #include "tsan_rtl.h"
+
+extern "C" int raise(int sig);
+
+// Only for POSIX.
+namespace __sanitizer {
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEET_END 2
+uptr internal_lseek(fd_t fd, OFF_T offset, int whence);
+}  // namespace __sanitizer
 
 namespace __tsan {
 namespace {
@@ -83,11 +95,7 @@ Scheduler::Scheduler()
 }
 
 Scheduler::~Scheduler() {
-  if (demo_record_.record_fd_ != kInvalidFd) {
-    // First call writes the previous entry, second call wites the END entry.
-    DemoRecordNext(tick_, END, 0, 0);
-    DemoRecordNext(tick_, END, 0, 0);
-  }
+  DemoRecordFinalise();
 }
 
 // Assume this is the only scheduler.
@@ -141,9 +149,11 @@ u64 Scheduler::RandomNumber() {
   return xorshift128plus() >> 1;
 }
 
-// Current thr must be active.
-// Any available thread must become active.
-// Locked due to ThreadDelete and for synchronisation.
+
+////////////////////////////////////////
+// Core ordering functions.
+////////////////////////////////////////
+
 void Scheduler::Tick(ThreadState *thr) {
   mtx.Lock();
   uptr cmp = kActive;
@@ -151,7 +161,6 @@ void Scheduler::Tick(ThreadState *thr) {
       atomic_compare_exchange_strong(&cond_vars_[thr->tid],
                                      &cmp, kInactive, memory_order_relaxed);
   CHECK(is_active);
-  //int next_tid = RandomNext(thr, SCHEDULE);
   int next_tid = last_free_idx_ == 0 ? 0 :
       cond_vars_idx_[RandomNext(thr, SCHEDULE) % last_free_idx_];
   CHECK(thread_status_[next_tid] == RUNNING ||
@@ -160,7 +169,6 @@ void Scheduler::Tick(ThreadState *thr) {
   mtx.Unlock();
 }
 
-// Must only check if it is active, not change it.
 void Scheduler::Wait(ThreadState *thr) {
   //  uptr cmp = kActive;
   //  while (!atomic_compare_exchange_strong(&cond_vars_[thr->tid],
@@ -170,8 +178,11 @@ void Scheduler::Wait(ThreadState *thr) {
   }
 }
 
-// Wait and Tick are called here, unlike with atomics.
-// The initial thread will call ThreadNew on itself, so should not be disabled.
+
+////////////////////////////////////////
+// Event specific interface functions.
+////////////////////////////////////////
+
 void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   ScopedScheduler scoped(this, thr);
   Enable(tid);
@@ -180,14 +191,12 @@ void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   }
 }
 
-// Replace this threads position in the last with the last.
-// Mark the one past the end as active so this thread can tick.
-// Wakes up parent thread if it is waiting for this thread to finish.
 void Scheduler::ThreadDelete(ThreadState *thr) {
   ScopedScheduler scoped(this, thr);
   Disable(thr->tid);
   thread_status_[thr->tid] = FINISHED;
   int ptid = thr->tctx->parent_tid;
+  // Wakes up parent thread if it is waiting for this thread to finish.
   if (thread_status_[ptid] != RUNNING && wait_tid_[ptid] == thr->tid) {
     CHECK(thread_status_[ptid] != FINISHED);
     Enable(ptid);
@@ -195,9 +204,9 @@ void Scheduler::ThreadDelete(ThreadState *thr) {
   }
 }
 
-// Disables itself if the joining thread is not finished.
 void Scheduler::ThreadJoin(ThreadState *thr, int join_tid) {
   ScopedScheduler scoped(this, thr);
+  // Disables itself if the joining thread is not finished.
   if (thread_status_[join_tid] != FINISHED) {
     Disable(thr->tid);
     wait_tid_[thr->tid] = join_tid;
@@ -287,7 +296,6 @@ u64 Scheduler::ForkBefore(ThreadState *thr) {
 }
 
 void Scheduler::ForkAfterParent(ThreadState *thr) {
-
 }
 
 void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
@@ -299,8 +307,139 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
   DemoRecordInitialise();
 }
 
+bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
+  mtx.Lock();
+  if (DemoPlayActive() &&
+      demo_play_.signal_tick_[thr->tid] != signal_tick_[thr->tid]) {
+    mtx.Unlock();
+    return false;
+  }
+  bool reenable = thread_status_[thr->tid] == DISABLED;
+  if (reenable) {
+    Enable(thr->tid);  // TODO on blocking in replay, thread needs to be woken at correct time.
+  }
+  mtx.Unlock();  // TODO other thread may have reenabled.
+  Wait(thr);
+  mtx.Lock();
+  if (reenable) {
+    Disable(thr->tid);
+  }
+  DemoRecordSignalNext(thr->tid, signal_tick_[thr->tid], signum);
+  if (blocking) {
+    // The ordering of signals in blocking calls is important.
+    // TODO Disable signal handling when here.
+    ++signal_tick_[thr->tid];
+  }
+  mtx.Unlock();
+  Tick(thr);
+  return true;
+}
+
+void Scheduler::SignalPending(ThreadState *thr) {
+  ++signal_tick_[thr->tid];
+  if (DemoPlayActive() &&
+      demo_play_.signal_tick_[thr->tid] == signal_tick_[thr->tid]) {
+    //Wait(thr);
+    for (int signal = 1, signals = demo_play_.signal_num_[thr->tid];
+         signals > 0;
+         ++signal, signals >>= 1) {
+      if (signals & 1) {
+        raise(signal);
+      }
+    }
+  }
+}
+
+void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {Printf("Intercepting: connect\n");
+  int real_ret = *ret;
+  void *params[1] = {ret};
+  uptr param_size[1] = {sizeof(int)};
+  DemoPlaySyscallNext("connect", 1, params, param_size);
+  CHECK(real_ret == *ret);
+  DemoRecordSyscallNext("connect", 1, params, param_size);
+}
+
+void Scheduler::SyscallIoctl(
+    int *ret, int fd, unsigned long request, void *arg) {Printf("Intercepting: ioctl\n");
+  void *params[2] = {ret, arg};
+  uptr param_size[2] = {sizeof(int), IOC_SIZE(request)};
+  DemoPlaySyscallNext("ioctl", 2, params, param_size);
+  DemoRecordSyscallNext("ioctl", 2, params, param_size);
+}
+
+void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout) {Printf("Intercepting: poll\n");
+  __sanitizer_pollfd *poll_fds = (__sanitizer_pollfd *)fds;
+  CHECK(nfds <= 16 && "Error: too many buffers in poll");
+  void *params[33] = {ret};
+  uptr param_size[33] = {sizeof(int)};
+  for (uptr p = 0; p < nfds; ++p) {
+    params[2 * p + 1] = &poll_fds[p].events;
+    param_size[2 * p + 1] = sizeof(poll_fds[p].events);
+    params[2 * p + 2] = &poll_fds[p].revents;
+    param_size[2 * p + 2] = sizeof(poll_fds[p].revents);
+  }
+  DemoPlaySyscallNext("poll", 2 * nfds + 1, params, param_size);
+  DemoRecordSyscallNext("poll", 2 * nfds + 1, params, param_size);
+}
+
+void Scheduler::SyscallRecv(
+    sptr *ret, int sockfd, void *buf, uptr len, int flags) {Printf("Intercepting: recv\n");
+  void *params[2] = {ret, buf};
+  uptr param_size[2] = {sizeof(sptr), len};
+  DemoPlaySyscallNext("recv", 2, params, param_size);
+  DemoRecordSyscallNext("recv", 2, params, param_size);
+}
+
+void Scheduler::SyscallRecvfrom(
+    sptr *ret, int sockfd, void *buf, uptr len, int flags,
+    void *src_addr, int *addrlen, uptr addrlen_pre) {Printf("Intercepting: recvfrom\n");
+  void *params[4] = {ret, buf, src_addr, addrlen};
+  uptr param_size[4] = {sizeof(sptr), len, addrlen_pre, sizeof(int)};
+  DemoPlaySyscallNext("recvfrom", 2, params, param_size);
+  DemoRecordSyscallNext("recvfrom", 2, params, param_size);
+}
+
+void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags) {Printf("Intercepting: recvmsg\n");
+  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;
+  CHECK(msg->msg_iovlen <= 16 && "Error: too many buffers in recvmsg");
+  void *params[20] = {ret};
+  uptr param_size[20] = {sizeof(sptr)};
+  //sptr total_size = *ret;
+  for (uptr p = 0; p < msg->msg_iovlen; ++p) {
+  //  sptr p_size
+    params[p + 1] = msg->msg_iov[p].iov_base;
+    param_size[p + 1] = msg->msg_iov[p].iov_len;
+  }
+  params[msg->msg_iovlen + 1] = msg->msg_name;
+  param_size[msg->msg_iovlen + 1] = msg->msg_namelen;
+  params[msg->msg_iovlen + 2] = msg->msg_control;
+  param_size[msg->msg_iovlen + 2] = msg->msg_controllen;
+  params[msg->msg_iovlen + 3] = &msg->msg_flags;
+  param_size[msg->msg_iovlen + 3] = sizeof(int);
+  DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 4, params, param_size);
+  DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 4, params, param_size);
+}
+
+/*void Scheduler::SyscallSocket(int *ret, int domain, int type, int protocol) {
+  int real_fd = *ret;
+  void *params[1] = {ret};
+  uptr param_size[1] = {sizeof(int)};
+  DemoPlaySyscallNext("socket", 1, params, param_size);
+  CHECK((*ret < 128) && "Too many fds");
+*ret = real_fd;
+  demo_play_.syscall_fd_map_[*ret] = real_fd;
+  DemoRecordSyscallNext("socket", 1, params, param_size);
+}*/
+
+/*int Scheduler::SyscallFdMap(int fd) {
+  if (!DemoPlayEnabled()) {
+    return fd;
+  }
+  CHECK((fd < 128) && "Invalid fd");
+  return demo_play_.syscall_fd_map_[fd];
+}*/
+
 void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
-  // The file within the custom FS has dir separators replaced with dots.
   char path[256];
   internal_snprintf(path, 256, "%s", file);
   for (int idx = 0; idx < 256 && path[idx] != '\0'; ++idx) {
@@ -322,6 +461,11 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
     *fd_record = OpenFile(buf.data(), WrOnly);
   }
 }
+
+
+////////////////////////////////////////
+// Other utilities.
+////////////////////////////////////////
 
 void Scheduler::Reschedule() {
   mtx.Lock();
@@ -366,21 +510,23 @@ u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
   return return_param;
 }
 
-// Called by ThreadDelete to enable the parent thread if necessary.
-// Parent thread will automatically wake up when the child finishes.
 void Scheduler::Enable(int tid) {
   cond_vars_idx_[last_free_idx_] = tid;
   cond_vars_idx_inv_[tid] = last_free_idx_++;
   thread_status_[tid] = RUNNING;
 }
 
-// Called by ThreadJoin to disable if child has not yet finished.
 void Scheduler::Disable(int tid) {
   int tid_last_idx = cond_vars_idx_[--last_free_idx_];
   cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
   cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
   thread_status_[tid] = DISABLED;
 }
+
+
+////////////////////////////////////////
+// Demo playback.
+////////////////////////////////////////
 
 void Scheduler::DemoPlayInitialise() {
   demo_play_.play_demo_ = flags()->play_demo && flags()->play_demo[0];
@@ -401,6 +547,20 @@ void Scheduler::DemoPlayInitialise() {
   s[1] = internal_simple_strtoll(
       demo_play_.demo_contents_, &demo_play_.demo_contents_, 10);
   DemoPlayNext();
+  // SIGNAL setup
+  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->play_demo);
+  CHECK(ReadFileToBuffer(
+      buf, &demo_play_.signal_contents_, &buffer_size, &contents_size));
+  for (int tid = 0; tid < kNumThreads; ++tid) {
+    DemoPlaySignalNext(tid);
+  }
+  // SYSCALL setup
+  //for (int fd = 0; fd < 128; ++fd) {
+  //  demo_play_.syscall_fd_map_[fd] = fd;
+  //}
+  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->play_demo);
+  CHECK(ReadFileToBuffer(
+      buf, &demo_play_.syscall_contents_, &buffer_size, &contents_size));
 }
 
 void Scheduler::DemoPlayNext() {
@@ -445,6 +605,77 @@ bool Scheduler::DemoPlayExpectParam2(u64 param2) {
   return !DemoPlayActive() || param2 == demo_play_.rnd_skip_;
 }
 
+void Scheduler::DemoPlaySignalNext(int tid) {
+  int signal_tid = internal_simple_strtoll(
+      demo_play_.signal_contents_, &demo_play_.signal_contents_, 10);
+  CHECK(signal_tid == tid && "Error: Signal file has desynchronised");
+  demo_play_.signal_tick_[tid] = internal_simple_strtoll(
+      demo_play_.signal_contents_, &demo_play_.signal_contents_, 10);
+  demo_play_.signal_num_[tid] = internal_simple_strtoll(
+      demo_play_.signal_contents_, &demo_play_.signal_contents_, 10);
+}
+
+void Scheduler::DemoPlaySyscallNext(
+    const char *func, uptr param_count, void *param[], uptr param_size[]) {
+  if (!/*DemoPlayActive()*/DemoPlayEnabled()) {
+    return;
+  }
+  uptr func_size = internal_strlen(func);
+  CHECK(internal_strncmp(func, demo_play_.syscall_contents_, func_size) == 0 &&
+        "Error: Syscall file has desynchronised");
+  demo_play_.syscall_contents_ += func_size;
+  for (uptr p = 0; p < param_count; ++p) {
+    sptr count = param_size[p];
+    unsigned char *data = (unsigned char *)param[p];
+    while (count != 0) {
+      CHECK(count > 0);
+      unsigned char flag = *((unsigned char *)demo_play_.syscall_contents_);
+      if (flag == (1 << 7)) {
+        uptr block = 32 < count ? 32 : count;
+        ++demo_play_.syscall_contents_;
+        internal_memcpy(data, demo_play_.syscall_contents_, block);
+        count -= block;
+        demo_play_.syscall_contents_ += block;
+        data += block;
+        continue;
+      }
+      unsigned block = flag & ((1 << 6) - 1);
+      if (flag & (1 << 6)) {
+        unsigned char high = *++demo_play_.syscall_contents_;
+        block |= ((unsigned)high << 6);
+        if (block == 0) {
+          block = 1 << 14;
+        }
+      }
+      internal_memset(data, 0, block);
+      count -= block;
+      ++demo_play_.syscall_contents_;
+      data += block;
+    }
+  }
+}
+
+void Scheduler::DemoPlaySyscallNextCheck() {
+  if (!/*DemoPlayActive()*/DemoPlayEnabled()) {
+    return;
+  }
+  const char * const syscalls[5] =
+      {"recvmsg", "recv", "poll", "ioctl", "connect"};
+  const uptr syssize[5] = {7, 4, 4, 5, 7};
+  for (uptr sys = 0; sys < 5; ++sys) {
+    if (internal_strncmp(
+        syscalls[sys], demo_play_.syscall_contents_, syssize[sys]) == 0) {
+      return;
+    }
+  }
+  CHECK(false && "Error: Next syscall inconsistent");
+}
+
+
+////////////////////////////////////////
+// Demo record.
+////////////////////////////////////////
+
 void Scheduler::DemoRecordInitialise() {
   demo_record_.record_fd_ = kInvalidFd;
   if (!flags()->record_demo || !flags()->record_demo[0]) {
@@ -457,6 +688,40 @@ void Scheduler::DemoRecordInitialise() {
   WriteToFile(demo_record_.record_fd_, buf, internal_strlen(buf));
   demo_record_.demo_tick_ = -1;
   demo_record_.event_type_ = END;
+  // SIGNAL setup
+  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->record_demo);
+  demo_record_.signal_fd_ = OpenFile(buf, WrOnly);
+  for (int tid = 0; tid < kNumThreads; ++tid) {
+    demo_record_.signal_file_pos_[tid] =
+        internal_lseek(demo_record_.signal_fd_, 0, SEEK_CUR);
+    demo_record_.signal_tick_[tid] = -1;
+    demo_record_.signal_num_[tid] = 0;
+    DemoRecordSignalLine(buf, tid, -1, 0);
+    WriteToFile(demo_record_.signal_fd_, buf, internal_strlen(buf));
+  }
+  // SYSCALL setup
+  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->record_demo);
+  demo_record_.syscall_fd_ = OpenFile(buf, WrOnly);
+}
+
+void Scheduler::DemoRecordFinalise() {
+  if (!DemoRecordEnabled()) {
+    return;
+  }
+  // First call writes the previous entry, second call wites the END entry.
+  DemoRecordNext(tick_, END, 0, 0);
+  DemoRecordNext(tick_, END, 0, 0);
+  // Signal
+  for (int tid = 0; tid < kNumThreads; ++tid) {
+    if (demo_record_.signal_tick_[tid] != (u64)-1) {
+      internal_lseek(demo_record_.signal_fd_,
+          demo_record_.signal_file_pos_[tid], SEEK_SET);
+      char line[65];
+      DemoRecordSignalLine(line,
+          tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]);
+      WriteToFile(demo_record_.signal_fd_, line, 64);
+    }
+  }
 }
 
 void Scheduler::DemoRecordNext(u64 tick, EventType type, u64 param, u64 rnd_skip) {
@@ -494,6 +759,91 @@ void Scheduler::DemoRecordOverride(
     // No demo information. It is the previous tick we are rescheduling.
     DemoRecordNext(tick, type, param, rnd_skip);
   }
+}
+
+void Scheduler::DemoRecordSignalNext(int tid, u64 signal_tick, int signum) {
+  if (!DemoRecordEnabled()) {
+    return;
+  }
+  // If this is a signal on a new tick, the old one must be written to its
+  // position in file and a new part of the file must be allocated.
+  if (demo_record_.signal_tick_[tid] == (u64)-1) {
+    demo_record_.signal_tick_[tid] = signal_tick;
+    demo_record_.signal_num_[tid] = (1 << (signum - 1));
+    return;
+  }
+  if (signal_tick != demo_record_.signal_tick_[tid]) {
+    uptr restore = internal_lseek(demo_record_.signal_fd_, 0, SEEK_CUR);
+    internal_lseek(demo_record_.signal_fd_,
+        demo_record_.signal_file_pos_[tid], SEEK_SET);
+    char line[65];
+    DemoRecordSignalLine(line,
+        tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]);
+    WriteToFile(demo_record_.signal_fd_, line, 64);
+    internal_lseek(demo_record_.signal_fd_, restore, SEEK_SET);
+    demo_record_.signal_file_pos_[tid] = restore;
+    DemoRecordSignalLine(line, tid, -1, 0);
+    WriteToFile(demo_record_.signal_fd_, line, 64);
+    // Refresh this thread's signal info.
+    demo_record_.signal_tick_[tid] = signal_tick;
+    demo_record_.signal_num_[tid] = 0;
+  }
+  demo_record_.signal_num_[tid] |= (1 << (signum - 1));
+}
+
+void Scheduler::DemoRecordSignalLine(
+    char *buf, int tid, u64 signal_tick, int signum) {
+  static const int kLineLength = 64;
+  int written = internal_snprintf(buf, kLineLength + 1, "%llu %llu %llu",
+      tid, signal_tick, signum);
+  CHECK(written <= kLineLength);
+  internal_memset(&buf[written], ' ', kLineLength - written - 1);
+  buf[kLineLength - 1] = '\n';
+}
+
+void Scheduler::DemoRecordSyscallNext(
+    const char *func, uptr param_count, void *param[], uptr param_size[]) {
+  if (!DemoRecordEnabled()) {
+    return;
+  }
+  WriteToFile(demo_record_.syscall_fd_, func, internal_strlen(func));
+  //for (uptr p = 0; p < param_count; ++p) {
+  //  WriteToFile(demo_record_.syscall_fd_, param[p], param_size[p]);
+  //}
+  for (uptr p = 0; p < param_count; ++p) {
+    uptr count = param_size[p];
+    unsigned char *data = (unsigned char *)param[p];
+    while (count != 0) {
+      CHECK(count > 0);
+      if (*data != 0) {
+        // Set flag bit to 1 and encode next 32 bytes as is.
+        uptr block = 32 < count ? 32 : count;
+        unsigned char type = 1 << 7;
+        WriteToFile(demo_record_.syscall_fd_, &type, 1);
+        WriteToFile(demo_record_.syscall_fd_, data, block);
+        count -= block;
+        data += block;
+        continue;
+      }
+      unsigned block = 1;
+      ++data;
+      while (block < (1 << 14) && block < count && *data == 0) {
+        ++block;
+        ++data;
+      }
+      // Set flag bit to 0 and collapse up to 16383 0s.
+      unsigned char type = 0;
+      type |= (block >= 64 ? (1 << 6) : 0);
+      type |= (block & ((1 << 6) - 1));
+      WriteToFile(demo_record_.syscall_fd_, &type, 1);
+      if (block >= 64) {
+        unsigned char high = block >> 6;
+        WriteToFile(demo_record_.syscall_fd_, &high, 1);
+      }
+      count -= block;
+    }
+  }
+  DemoPlaySyscallNextCheck();
 }
 
 }  // namespace __tsan
