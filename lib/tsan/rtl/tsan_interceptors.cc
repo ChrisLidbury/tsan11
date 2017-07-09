@@ -35,7 +35,7 @@
 
 using namespace __tsan;  // NOLINT
 
-#define CHECK_FILE_ACCESS 1
+#define CHECK_FILE_ACCESS 0
 #if CHECK_FILE_ACCESS
 #define FCHECK(X) Printf("File function: %s\n", #X);
 #else
@@ -358,14 +358,14 @@ TSAN_INTERCEPTOR(unsigned, sleep, unsigned sec) {FCHECK(false&&"sleep");
   return res;
 }
 
-TSAN_INTERCEPTOR(int, usleep, long_t usec) {FCHECK(false&&"usleep");
+TSAN_INTERCEPTOR(int, usleep, long_t usec) {//FCHECK(false&&"usleep");
   SCOPED_TSAN_INTERCEPTOR(usleep, usec);
   int res = BLOCK_REAL(usleep)(usec);
   AfterSleep(thr, pc);
   return res;
 }
 
-TSAN_INTERCEPTOR(int, nanosleep, void *req, void *rem) {FCHECK(false&&"nanosleep");
+TSAN_INTERCEPTOR(int, nanosleep, void *req, void *rem) {//FCHECK(false&&"nanosleep");
   SCOPED_TSAN_INTERCEPTOR(nanosleep, req, rem);
   int res = BLOCK_REAL(nanosleep)(req, rem);
   AfterSleep(thr, pc);
@@ -1097,6 +1097,7 @@ static int cond_wait(ThreadState *thr, uptr pc, bool timed, void *c, void *m) {
   ctx->scheduler.CondWait(thr, c, timed);
   REAL(pthread_mutex_unlock)(m);
   MutexUnlock(thr, pc, (uptr)m);
+  ctx->scheduler.MutexUnlock(thr, m);
   ctx->scheduler.Tick(thr);
   // Now we wait on the cond var. Will return once signalled and scheduled.
   return __interceptor_pthread_mutex_lock(m);
@@ -1586,12 +1587,14 @@ TSAN_INTERCEPTOR(int, socketpair, int domain, int type, int protocol, int *fd) {
   return res;
 }
 
-TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {/*FCHECK(false&&"connect");*/Printf("Connect: %s\n", (char*)addr);
+TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {
   SCOPED_TSAN_INTERCEPTOR(connect, fd, addr, addrlen);
   FdSocketConnecting(thr, pc, fd);
-  //int real_fd = __tsan::ctx->scheduler.SyscallFdMap(fd);
-  int res = REAL(connect)(fd, addr, addrlen);
-  __tsan::ctx->scheduler.SyscallConnect(&res, fd, addr, addrlen);
+  int res;
+  __tsan::Scheduler::Syscallback3<int, int, void *, unsigned> cb(
+      REAL(connect), &res, fd, addr, addrlen);
+  //int res = REAL(connect)(fd, addr, addrlen);
+  __tsan::ctx->scheduler.SyscallConnect(&res, fd, addr, addrlen, &cb);
   if (res == 0 && fd >= 0)
     FdSocketConnect(thr, pc, fd);
   return res;
@@ -1619,7 +1622,9 @@ TSAN_INTERCEPTOR(int, select, int nfds,
     __sanitizer___kernel_fd_set *exceptfds,
     void *timeval) {FCHECK(false&&"select");
   SCOPED_TSAN_INTERCEPTOR(select, nfds, readfds, writefds, exceptfds, timeval);
-  return REAL(select)(nfds, readfds, writefds, exceptfds, timeval);
+  int res;// = REAL(select)(nfds, readfds, writefds, exceptfds, timeval);
+  __tsan::ctx->scheduler.SyscallSelect(&res, nfds, (void *)readfds, (void *)writefds, (void *)exceptfds, (void *)timeval, (void *)REAL(select));
+  return res;
 }
 
 TSAN_INTERCEPTOR(int, close, int fd) {FCHECK(false&&"close");
@@ -1710,7 +1715,7 @@ TSAN_INTERCEPTOR(void*, tmpfile64, int fake) {FCHECK(false&&"tmpfile64");
 #define TSAN_MAYBE_INTERCEPT_TMPFILE64
 #endif
 
-TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr nmemb, void *f) {FCHECK(false&&"fread");
+TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr nmemb, void *f) {//FCHECK(false&&"fread");
   // libc file streams can call user-supplied functions, see fopencookie.
   {
     SCOPED_TSAN_INTERCEPTOR(fread, ptr, size, nmemb, f);
@@ -2110,7 +2115,7 @@ TSAN_INTERCEPTOR(int, pthread_kill, void *tid, int sig) {
   return res;
 }
 
-TSAN_INTERCEPTOR(int, gettimeofday, void *tv, void *tz) {FCHECK(false&&"gettimeofday");
+TSAN_INTERCEPTOR(int, gettimeofday, void *tv, void *tz) {//FCHECK(false&&"gettimeofday");
   SCOPED_TSAN_INTERCEPTOR(gettimeofday, tv, tz);
   // It's intercepted merely to process pending signals.
   return REAL(gettimeofday)(tv, tz);
@@ -2296,8 +2301,8 @@ static void HandleRecvmsg(ThreadState *thr, uptr pc,
   if (file) {                                         \
     int fd = fileno_unlocked(file);                   \
     if (fd >= 0) FdFileCreate(thr, pc, fd);           \
-  } \
-Printf("%s\n", path);
+  }
+  //Printf("%s\n", path);
 
 // Scheduler for file open
 /*#define COMMON_INTERCEPTOR_FILE_OPEN_SCHEDULE(ctx, path)           \
@@ -2379,10 +2384,25 @@ Printf("%s\n", path);
 
 #define COMMON_INTERCEPTOR_MUTEX_LOCK(ctx, m) {}
 
+//#define COMMON_INTERCEPTOR_MUTEX_LOCK_SCHEDULE(ctx, m) \
+//  int res_ = EBUSY; \
+//  while (res_ == EBUSY) { \
+//    res_ = __interceptor_pthread_mutex_trylock(m); \
+//  } \
+//  return res_
+
 #define COMMON_INTERCEPTOR_MUTEX_LOCK_SCHEDULE(ctx, m) \
   int res_ = EBUSY; \
   while (res_ == EBUSY) { \
-    res_ = __interceptor_pthread_mutex_trylock(m); \
+    __tsan::ctx->scheduler.Wait(thr); \
+    res_ = REAL(pthread_mutex_trylock)(m); \
+    if (res_ == EOWNERDEAD) \
+      MutexRepair(thr, pc, (uptr)m); \
+    if (res_ == 0 || res_ == EOWNERDEAD) \
+      MutexLock(thr, pc, (uptr)m, /*rec=*/1, /*try_lock=*/true); \
+    if (res_ == EBUSY) \
+      __tsan::ctx->scheduler.MutexLockFail(thr, m); \
+    __tsan::ctx->scheduler.Tick(thr); \
   } \
   return res_
 
@@ -2394,6 +2414,7 @@ Printf("%s\n", path);
   } \
   MutexUnlock(((TsanInterceptorContext *)ctx)->thr, \
             ((TsanInterceptorContext *)ctx)->pc, (uptr)m); \
+  __tsan::ctx->scheduler.MutexUnlock(thr, m); \
   __tsan::ctx->scheduler.Tick(thr); \
   return res_
 

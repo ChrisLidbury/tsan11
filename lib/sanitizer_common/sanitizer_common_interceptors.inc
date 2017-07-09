@@ -40,7 +40,7 @@
 
 #include <stdarg.h>
 
-#define CHECK_FILE_ACCESS 1
+#define CHECK_FILE_ACCESS 0
 #if CHECK_FILE_ACCESS
 #define FCHECK(X) Printf("File function: %s\n", #X);
 #else
@@ -988,11 +988,12 @@ INTERCEPTOR(int, prctl, int option, unsigned long arg2,
 #endif  // SANITIZER_INTERCEPT_PRCTL
 
 #if SANITIZER_INTERCEPT_TIME
-INTERCEPTOR(unsigned long, time, unsigned long *t) {FCHECK(false&&"time");
+INTERCEPTOR(unsigned long, time, unsigned long *t) {// Scheduler done.
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, time, t);
   unsigned long local_t;
   unsigned long res = REAL(time)(&local_t);
+  //__tsan::ctx->scheduler.SyscallTime(&res, &local_t);
   if (t && res != (unsigned long)-1) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, t, sizeof(*t));
     *t = local_t;
@@ -1491,7 +1492,26 @@ INTERCEPTOR(int, ioctl, int d, unsigned long request, ...) { /* Scheduler done *
   }
 
   if (desc) ioctl_common_pre(ctx, desc, d, request, arg);
+//
+/*u64 bits = 0;
+uptr size = IOC_SIZE(request);
+for (unsigned i = 0; i < size / 8; ++i) {
+  bits = (bits >> 1) | ((bits & 1) << 63);
+  bits ^= ((u64 *)arg)[i];
+}*/
+//
   int res = REAL(ioctl)(d, request, arg);
+//
+/*u64 bits_ = 0;
+for (unsigned i = 0; i < size / 8; ++i) {
+  bits_ = (bits_ >> 1) | ((bits_ & 1) << 63);
+  bits_ ^= ((u64 *)arg)[i];
+}
+if (bits != bits_)
+  Printf("ioctl request 0x%x with arg of size %zu different: 0x%llx vs 0x%llx\n", request, size, bits, bits_);
+else
+  Printf("ioctl request 0x%x with arg of size %zu same\n", request, size);
+*///
   __tsan::ctx->scheduler.SyscallIoctl(&res, d, request, arg);
   // FIXME: some ioctls have different return values for success and failure.
   if (desc && res != -1) ioctl_common_post(ctx, desc, res, d, request, arg);
@@ -2556,10 +2576,15 @@ INTERCEPTOR(SSIZE_T, recvmsg, int fd, struct __sanitizer_msghdr *msg,
   // FIXME: under ASan the call below may write to freed memory and corrupt
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
-//for (uptr p = 0; p < msg->msg_iovlen; ++p) internal_memset(msg->msg_iov[p].iov_base, 0, msg->msg_iov[p].iov_len);
-  //int real_fd = __tsan::ctx->scheduler.SyscallFdMap(fd);
-  SSIZE_T res = REAL(recvmsg)(fd, msg, flags);
-  __tsan::ctx->scheduler.SyscallRecvmsg(&res, fd, msg, flags);
+  for (uptr p = 0; p < msg->msg_iovlen; ++p) {
+    internal_memset(msg->msg_iov[p].iov_base, 0, msg->msg_iov[p].iov_len);
+  }
+  SSIZE_T res;
+  __tsan::Scheduler::Syscallback3<
+      SSIZE_T, int, struct __sanitizer_msghdr *, int> cb(
+          REAL(recvmsg), &res, fd, msg, flags);
+  //SSIZE_T res = REAL(recvmsg)(fd, msg, flags);
+  __tsan::ctx->scheduler.SyscallRecvmsg(&res, fd, msg, flags, &cb);
   if (res >= 0) {
     if (fd >= 0) COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
     if (msg) {
@@ -2626,14 +2651,19 @@ static void read_msghdr(void *ctx, struct __sanitizer_msghdr *msg,
 }
 
 INTERCEPTOR(SSIZE_T, sendmsg, int fd, struct __sanitizer_msghdr *msg,
-            int flags) {FCHECK(false&&"sendmsg");
+            int flags) {//Scheduler done.
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sendmsg, fd, msg, flags);
   if (fd >= 0) {
     COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
     COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd);
   }
-  SSIZE_T res = REAL(sendmsg)(fd, msg, flags);
+  SSIZE_T res;
+  __tsan::Scheduler::Syscallback3<
+      SSIZE_T, int, __sanitizer_msghdr *, int> cb(
+      REAL(sendmsg), &res, fd, msg, flags);
+  //SSIZE_T res = REAL(sendmsg)(fd, msg, flags);
+  __tsan::ctx->scheduler.SyscallSendmsg(&res, fd, msg, flags, &cb);
   if (common_flags()->intercept_send && res >= 0 && msg)
     read_msghdr(ctx, msg, res);
   return res;
@@ -3400,18 +3430,13 @@ INTERCEPTOR(int, poll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, poll, fds, nfds, timeout);
   if (fds && nfds) read_pollfd(ctx, fds, nfds);
-  //CHECK((nfds <= 128) && "Too many fds");
-  //__sanitizer_pollfd real_fds[128];
-  //internal_memcpy(real_fds, fds, nfds * sizeof(__sanitizer_pollfd));
-  //for (unsigned f = 0; f < nfds; ++f) {
-  //  real_fds[f].fd = __tsan::ctx->scheduler.SyscallFdMap(fds[f].fd);
-  //}
-//if (timeout < 10) timeout = 100;
-  int res = COMMON_INTERCEPTOR_BLOCK_REAL(poll)(fds, nfds, timeout);
-  //for (unsigned f = 0; f < nfds; ++f) {
-  //  fds[f].revents = real_fds[f].revents;
-  //}
-  __tsan::ctx->scheduler.SyscallPoll(&res, fds, nfds, timeout);
+  if (timeout < 0) timeout = 100;
+  int res;
+  __tsan::Scheduler::Syscallback3<
+      int, __sanitizer_pollfd *, __sanitizer_nfds_t, int> cb(
+      COMMON_INTERCEPTOR_BLOCK_REAL(poll), &res, fds, nfds, timeout);
+  //int res = COMMON_INTERCEPTOR_BLOCK_REAL(poll)(fds, nfds, timeout);
+  __tsan::ctx->scheduler.SyscallPoll(&res, fds, nfds, timeout, &cb);
   if (fds && nfds) write_pollfd(ctx, fds, nfds);
   return res;
 }
@@ -3639,7 +3664,7 @@ INTERCEPTOR(int, pthread_mutex_lock, void *m) {
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_lock, m);
   //
   COMMON_INTERCEPTOR_MUTEX_LOCK_SCHEDULE(ctx, m);
-  //
+  // Unreachable
   int res = REAL(pthread_mutex_lock)(m);
   if (res == errno_EOWNERDEAD)
     COMMON_INTERCEPTOR_MUTEX_REPAIR(ctx, m);
@@ -3654,6 +3679,7 @@ INTERCEPTOR(int, pthread_mutex_unlock, void *m) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_unlock, m);
   COMMON_INTERCEPTOR_MUTEX_UNLOCK(ctx, m);
+  // Unreachable
   int res = REAL(pthread_mutex_unlock)(m);
   if (res == errno_EINVAL)
     COMMON_INTERCEPTOR_MUTEX_INVALID(ctx, m);
@@ -5735,10 +5761,13 @@ INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) { /* Schedu
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, recv, fd, buf, len, flags);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
-//internal_memset(buf, 0, len);
-  //int real_fd = __tsan::ctx->scheduler.SyscallFdMap(fd);
-  SSIZE_T res = REAL(recv)(fd, buf, len, flags);
-  __tsan::ctx->scheduler.SyscallRecv(&res, fd, buf, len, flags);
+  internal_memset(buf, 0, len);
+  SSIZE_T res;
+  __tsan::Scheduler::Syscallback4<
+      SSIZE_T, int, void *, SIZE_T, int> cb(
+      REAL(recv), &res, fd, buf, len, flags);
+  //SSIZE_T res = REAL(recv)(fd, buf, len, flags);
+  __tsan::ctx->scheduler.SyscallRecv(&res, fd, buf, len, flags, &cb);
   if (res > 0) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, Min((SIZE_T)res, len));
   }

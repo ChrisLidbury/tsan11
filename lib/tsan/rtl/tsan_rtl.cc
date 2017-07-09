@@ -177,7 +177,7 @@ static void BackgroundThread(void *arg) {
   for (int i = 0;
       atomic_load(&ctx->stop_background_thread, memory_order_relaxed) == 0;
       i++) {
-    SleepForMillis(100);
+    //SleepForMillis(100);
     u64 now = NanoTime();
 
     // Flush memory if requested.
@@ -221,7 +221,10 @@ static void BackgroundThread(void *arg) {
     }
 
     // Check if scheduler is blocked.
-    ctx->scheduler.Reschedule();
+    for (int i = 0; i < 100; ++i) {
+      ctx->scheduler.Reschedule();
+      SleepForMillis(1);
+    }
   }
 }
 

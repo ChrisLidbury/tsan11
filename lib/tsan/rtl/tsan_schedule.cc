@@ -1,14 +1,26 @@
 #include "tsan_schedule.h"
 
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
+#include "sanitizer_common/sanitizer_symbolizer.h"
 //#include "sanitizer_common/sanitizer_posix.h"  // For internal_lseek
 #include "tsan_mutex.h"
 #include "tsan_rtl.h"
 
-extern "C" int raise(int sig);
+int tsanstart = 0;
+
+extern "C" int raise(int sig);  // For signal replay.
+//#include <cerrno>               // For syscall record/replay.
+extern "C" int *__errno_location();
+
+// fd set macros for syscall select.
+#define FD_ZERO(fds) {u64 *fds_ = (u64 *)fds; fds_[0] = 0; fds_[1] = 0;}
+#define FD_CLR(fd, fds) (((u64 *)fds)[fd / 64] &= ~((u64)1 << (fd % 64)))
+#define FD_SET(fd, fds) (((u64 *)fds)[fd / 64] |= ((u64)1 << (fd % 64)))
+#define FD_ISSET(fd, fds) ((((u64 *)fds)[fd / 64] & ((u64)1 << (fd % 64))) != 0)
 
 // Only for POSIX.
 namespace __sanitizer {
@@ -92,6 +104,8 @@ Scheduler::Scheduler()
   internal_memset(thread_status_, FINISHED, sizeof(thread_status_));
   internal_memset(wait_tid_, -1, sizeof(wait_tid_));
   internal_memset(thread_cond_, 0, sizeof(thread_cond_));
+  internal_memset(thread_mtx_, 0, sizeof(thread_mtx_));
+  internal_memset(exclude_point_, 0, sizeof(exclude_point_));
 }
 
 Scheduler::~Scheduler() {
@@ -144,38 +158,121 @@ void Scheduler::Initialise() {
   }
 }
 
-u64 Scheduler::RandomNumber() {
-  // Reading from file only supports s64, not u64. So the MSB must be 0.
-  return xorshift128plus() >> 1;
-}
-
 
 ////////////////////////////////////////
 // Core ordering functions.
 ////////////////////////////////////////
 
+void Scheduler::Wait(ThreadState *thr) {
+  uptr cmp = kActive;
+  while (!atomic_compare_exchange_strong(
+      &cond_vars_[thr->tid], &cmp, kCritical, memory_order_relaxed)) {
+    CHECK(cmp == kInactive);
+    cmp = kActive;
+    // Racy
+    //pri_[thr->tid] = kMaxPri;
+    proc_yield(20);
+  }
+}
+
 void Scheduler::Tick(ThreadState *thr) {
   mtx.Lock();
-  uptr cmp = kActive;
-  bool is_active =
-      atomic_compare_exchange_strong(&cond_vars_[thr->tid],
-                                     &cmp, kInactive, memory_order_relaxed);
-  CHECK(is_active);
-  int next_tid = last_free_idx_ == 0 ? 0 :
-      cond_vars_idx_[RandomNext(thr, SCHEDULE) % last_free_idx_];
+  uptr cmp = kCritical;
+  bool is_critical = atomic_compare_exchange_strong(
+      &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
+  CHECK(is_critical);
+  // If annotated out, immedaitely reenable this thread.
+  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
+    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
+    mtx.Unlock();
+    return;
+  }
+  if (pri_[thr->tid] > kMaxPri) {
+    --pri_[thr->tid];
+    //pri_[thr->tid] = kMaxPri;
+  }
+  {
+  Printf("%d - %d - ", thr->tid, tick_);
+  PrintUserSanitizerStackBoundary();
+  Printf("\n");
+  }
+  // Now to find the next tid to activate.
+  int next_tid;
+  u64 rnd = RandomNext(thr, SCHEDULE);
+  if (rnd == (u64)-1) {
+    for (u64 demo_skip = demo_play_.rnd_skip_; demo_skip > 0; --demo_skip) {
+      int skip_tid = Schedule(RandomNumber());
+      if (pri_[skip_tid] < kMinPri) {
+        ++pri_[skip_tid];
+      }
+    }
+    RandomNumber();
+    next_tid = demo_play_.event_param_;
+  } else {
+    next_tid = Schedule(rnd);
+  }
+  // Activate chosen next tid.
   CHECK(thread_status_[next_tid] == RUNNING ||
       (next_tid == 0 && last_free_idx_ == 0));
   atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+  active_tid_ = next_tid;
   mtx.Unlock();
 }
 
-void Scheduler::Wait(ThreadState *thr) {
-  //  uptr cmp = kActive;
-  //  while (!atomic_compare_exchange_strong(&cond_vars_[thr->tid],
-  //                                         &cmp, kActive, memory_order_relaxed))
-  while (atomic_load(&cond_vars_[thr->tid], memory_order_relaxed) != kActive) {
-    proc_yield(20);
+void Scheduler::Reschedule() {
+  mtx.Lock();
+  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_ ||
+      exclude_point_[active_tid_] == 1) {
+    reschedule_tick_ = tick_;
+    mtx.Unlock();
+    return;
   }
+  int tid = active_tid_;
+  uptr cmp = kActive;
+  bool is_active = atomic_compare_exchange_strong(
+      &cond_vars_[tid], &cmp, kInactive, memory_order_relaxed);
+  if (!is_active) {
+    CHECK(cmp == kCritical);
+    mtx.Unlock();
+    return;
+  }
+  if (pri_[tid] < kMinPri) {
+    ++pri_[tid];
+  }
+  int next_tid = Schedule(RandomNumber());
+  CHECK(thread_status_[next_tid] == RUNNING);
+  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+  active_tid_ = next_tid;
+  DemoRecordOverride(tick_ - 1, SCHEDULE, next_tid, 1);
+  mtx.Unlock();
+}
+
+int Scheduler::Schedule(u64 rnd) {
+  if (last_free_idx_ == 0) {
+    return 0;
+  }
+  if (last_free_idx_ == 1) {
+    return cond_vars_idx_[0];
+  }
+  // Check if the rnd is a miss in the scheduling table.
+  u64 row = rnd / last_free_idx_;
+  int col = rnd % last_free_idx_;
+  int pri = pri_[cond_vars_idx_[col]];
+  int hit_rate = (pri < 0 ? -pri : pri) + 2;
+  if (!(row % hit_rate > 0) != !(pri > 0)) {
+    return cond_vars_idx_[col];
+  }
+  // rnd is a miss, row number is squashed and becomes new rnd.
+  // Second lookup with new rnd ignores missed tid.
+  u64 new_rnd = row / hit_rate;
+  if (pri > 0) {
+    new_rnd = row - new_rnd - 1;
+  }
+  int new_col = new_rnd % (last_free_idx_ - 1);
+  if (new_col >= col) {
+    ++new_col;
+  }
+  return cond_vars_idx_[new_col];
 }
 
 
@@ -257,6 +354,34 @@ void Scheduler::CondBroadcast(ThreadState *thr, void *c) {
       thread_cond_[i] = 0;
     }
   }
+}
+
+void Scheduler::MutexLockFail(ThreadState *thr, void *m) {
+  mtx.Lock();
+  Disable(thr->tid);
+  thread_mtx_[thr->tid] = (atomic_uintptr_t*)m;
+  mtx.Unlock();
+}
+
+void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
+  mtx.Lock();
+  int mtx_tids[kNumThreads];
+  int count = 0;
+  for (int i = 0; i < kNumThreads; ++i) {
+    if (thread_mtx_[i] == (atomic_uintptr_t*)m) {
+      mtx_tids[count++] = i;
+    }
+  }
+  if (count == 0) {
+    mtx.Unlock();
+    return;
+  }
+  int tid_signal = mtx_tids[RandomNext(thr, COND_SIGNAL) % count];
+  if (thread_status_[tid_signal] == DISABLED) {
+    Enable(tid_signal);
+  }
+  thread_mtx_[tid_signal] = 0;
+  mtx.Unlock();
 }
 
 // Check if the next forked process is done by this thread.
@@ -350,94 +475,220 @@ void Scheduler::SignalPending(ThreadState *thr) {
   }
 }
 
-void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {Printf("Intercepting: connect\n");
+bool Scheduler::SyscallIsInputFd(const char *addr, uptr addrlen) {
+  static const char *const kInputAddrs[3] =
+      {"/tmp/.X11-unix/X0", "/tmp/dbus-", "/run/user/" };
+  static const uptr kInputAddrLens[3] = {17, 10, 10};
+  for (unsigned idx = 0; idx < 3; ++idx) {
+    uptr len = addrlen > kInputAddrLens[idx] ? kInputAddrLens[idx] : addrlen;
+    if (internal_strncmp(kInputAddrs[idx], addr, len) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen, Syscallback *syscallback) {
+  //Printf("Intercepting: connect %d -> %s\n", sockfd, (const char *)(addr) + 2);
+  syscallback->Call();
+  const char *path = (const char *)(addr) + sizeof(short);
+  uptr path_len = addrlen - sizeof(short);
+  while (*path == 0 && --path_len > 0) {
+    ++path;
+  }
+  Printf("Intercepting: connect %d -> %s\n", sockfd, path);
+  if (!SyscallIsInputFd(path, path_len)) {
+    input_fd_[sockfd] = false;
+    return;
+  }
+  CHECK(sockfd < kMaxFd && "Socket fd too large.");
+  input_fd_[sockfd] = true;
   int real_ret = *ret;
-  void *params[1] = {ret};
-  uptr param_size[1] = {sizeof(int)};
-  DemoPlaySyscallNext("connect", 1, params, param_size);
+  int replay_fd = sockfd;
+  void *params[2] = {ret, &replay_fd};
+  uptr param_size[2] = {sizeof(int), sizeof(int)};
+  ScopedScheduler(this, cur_thread());
+  DemoPlaySyscallNext("connect", 2, params, param_size);
   CHECK(real_ret == *ret);
-  DemoRecordSyscallNext("connect", 1, params, param_size);
+  fd_map_[replay_fd] = sockfd;
+  DemoRecordSyscallNext("connect", 2, params, param_size);
 }
 
 void Scheduler::SyscallIoctl(
-    int *ret, int fd, unsigned long request, void *arg) {Printf("Intercepting: ioctl\n");
-  void *params[2] = {ret, arg};
-  uptr param_size[2] = {sizeof(int), IOC_SIZE(request)};
-  DemoPlaySyscallNext("ioctl", 2, params, param_size);
-  DemoRecordSyscallNext("ioctl", 2, params, param_size);
+    int *ret, int fd, unsigned long request, void *arg) {
+  //Printf("Intercepting: ioctl %d\n", fd);
+  //void *params[2] = {ret, arg};
+  //uptr param_size[2] = {sizeof(int), IOC_SIZE(request)};
+  //DemoPlaySyscallNext("ioctl", 2, params, param_size);
+  //DemoRecordSyscallNext("ioctl", 2, params, param_size);
 }
 
-void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout) {Printf("Intercepting: poll\n");
+void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout, Syscallback *syscallback) {
+  //Printf("Intercepting: poll");
+  syscallback->Call();
+  int errno_ = *__errno_location();
   __sanitizer_pollfd *poll_fds = (__sanitizer_pollfd *)fds;
-  CHECK(nfds <= 16 && "Error: too many buffers in poll");
-  void *params[33] = {ret};
-  uptr param_size[33] = {sizeof(int)};
+  CHECK(nfds <= 12 && "Error: too many buffers in poll");
+  // Separate input fds from non-input to be recorded.
+  uptr icount = 0;
+  void *params[26] = {ret};
+  uptr param_size[26] = {sizeof(int)};
   for (uptr p = 0; p < nfds; ++p) {
-    params[2 * p + 1] = &poll_fds[p].events;
-    param_size[2 * p + 1] = sizeof(poll_fds[p].events);
-    params[2 * p + 2] = &poll_fds[p].revents;
-    param_size[2 * p + 2] = sizeof(poll_fds[p].revents);
+    if (!input_fd_[poll_fds[0].fd]) {
+      continue;
+    }
+    params[2 * icount + 1] = &poll_fds[p].events;
+    param_size[2 * icount + 1] = sizeof(poll_fds[p].events);
+    params[2 * icount + 2] = &poll_fds[p].revents;
+    param_size[2 * icount + 2] = sizeof(poll_fds[p].revents);
+    ++icount;
   }
-  DemoPlaySyscallNext("poll", 2 * nfds + 1, params, param_size);
-  DemoRecordSyscallNext("poll", 2 * nfds + 1, params, param_size);
+  params[2 * icount + 1] = &errno_;
+  param_size[2 * icount + 1] = sizeof(int);
+  if (icount == 0) {
+    *__errno_location() = errno_;
+    return;
+  }
+  // TODO If there is a mix on input fds and non-input fds.
+  // Record another var that indicated if non-input fds unblocked thread.
+  CHECK(icount == nfds);
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("poll", 2 * nfds + 2, params, param_size);
+  DemoRecordSyscallNext("poll", 2 * nfds + 2, params, param_size);
+  *__errno_location() = errno_;
 }
 
 void Scheduler::SyscallRecv(
-    sptr *ret, int sockfd, void *buf, uptr len, int flags) {Printf("Intercepting: recv\n");
-  void *params[2] = {ret, buf};
-  uptr param_size[2] = {sizeof(sptr), len};
-  DemoPlaySyscallNext("recv", 2, params, param_size);
-  DemoRecordSyscallNext("recv", 2, params, param_size);
+    sptr *ret, int sockfd, void *buf, uptr len, int flags, Syscallback *syscallback) {
+ // Printf("Intercepting: recv\n");
+  syscallback->Call();
+  int errno_ = *__errno_location();
+  if (!input_fd_[sockfd]) {
+    return;
+  }
+  void *params[3] = {ret, buf, &errno_};
+  uptr param_size[3] = {sizeof(sptr), len, sizeof(int)};
+  ScopedScheduler(this, cur_thread());
+  DemoPlaySyscallNext("recv", 3, params, param_size);
+  DemoRecordSyscallNext("recv", 3, params, param_size);
+  *__errno_location() = errno_;
 }
 
 void Scheduler::SyscallRecvfrom(
     sptr *ret, int sockfd, void *buf, uptr len, int flags,
-    void *src_addr, int *addrlen, uptr addrlen_pre) {Printf("Intercepting: recvfrom\n");
+    void *src_addr, int *addrlen, uptr addrlen_pre) {
+  //Printf("Intercepting: recvfrom\n");
+  if (!input_fd_[sockfd]) {
+    return;
+  }
   void *params[4] = {ret, buf, src_addr, addrlen};
   uptr param_size[4] = {sizeof(sptr), len, addrlen_pre, sizeof(int)};
+  ScopedScheduler(this, cur_thread());
   DemoPlaySyscallNext("recvfrom", 2, params, param_size);
   DemoRecordSyscallNext("recvfrom", 2, params, param_size);
 }
 
-void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags) {Printf("Intercepting: recvmsg\n");
+void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, Syscallback *syscallback) {
+  //Printf("Intercepting: recvmsg %d\n", sockfd);
+  syscallback->Call();
+  int errno_ = *__errno_location();
+  if (!input_fd_[sockfd]) {
+    return;
+  }
   __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;
   CHECK(msg->msg_iovlen <= 16 && "Error: too many buffers in recvmsg");
-  void *params[20] = {ret};
-  uptr param_size[20] = {sizeof(sptr)};
-  //sptr total_size = *ret;
+  void *params[22] = {ret};
+  uptr param_size[22] = {sizeof(sptr)};
   for (uptr p = 0; p < msg->msg_iovlen; ++p) {
-  //  sptr p_size
     params[p + 1] = msg->msg_iov[p].iov_base;
     param_size[p + 1] = msg->msg_iov[p].iov_len;
   }
   params[msg->msg_iovlen + 1] = msg->msg_name;
   param_size[msg->msg_iovlen + 1] = msg->msg_namelen;
-  params[msg->msg_iovlen + 2] = msg->msg_control;
-  param_size[msg->msg_iovlen + 2] = msg->msg_controllen;
-  params[msg->msg_iovlen + 3] = &msg->msg_flags;
-  param_size[msg->msg_iovlen + 3] = sizeof(int);
-  DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 4, params, param_size);
-  DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 4, params, param_size);
+  params[msg->msg_iovlen + 2] = &param_size[msg->msg_iovlen + 3];
+  param_size[msg->msg_iovlen + 2] = sizeof(uptr);
+  params[msg->msg_iovlen + 3] = msg->msg_control;
+  param_size[msg->msg_iovlen + 3] = msg->msg_controllen;
+  params[msg->msg_iovlen + 4] = &msg->msg_flags;
+  param_size[msg->msg_iovlen + 4] = sizeof(int);
+  params[msg->msg_iovlen + 5] = &errno_;
+  param_size[msg->msg_iovlen + 5] = sizeof(int);
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
+  msg->msg_controllen = param_size[msg->msg_iovlen + 3];
+  DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
+  *__errno_location() = errno_;
 }
 
-/*void Scheduler::SyscallSocket(int *ret, int domain, int type, int protocol) {
-  int real_fd = *ret;
-  void *params[1] = {ret};
-  uptr param_size[1] = {sizeof(int)};
-  DemoPlaySyscallNext("socket", 1, params, param_size);
-  CHECK((*ret < 128) && "Too many fds");
-*ret = real_fd;
-  demo_play_.syscall_fd_map_[*ret] = real_fd;
-  DemoRecordSyscallNext("socket", 1, params, param_size);
-}*/
-
-/*int Scheduler::SyscallFdMap(int fd) {
-  if (!DemoPlayEnabled()) {
-    return fd;
+void Scheduler::SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags, Syscallback *syscallback) {
+  syscallback->Call();
+  int errno_ = *__errno_location();
+  if (!input_fd_[sockfd]) {
+    return;
   }
-  CHECK((fd < 128) && "Invalid fd");
-  return demo_play_.syscall_fd_map_[fd];
-}*/
+  void *params[2] = {ret, &errno_};
+  uptr param_size[2] = {sizeof(sptr), sizeof(int)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("sendmsg", 2, params, param_size);
+  DemoRecordSyscallNext("sendmsg", 2, params, param_size);
+  *__errno_location() = errno_;
+}
+
+void Scheduler::SyscallSelect(
+    int *ret, int nfds, void *readfds, void *writefds, void *exceptfds,
+    void *timeout, void *select) {
+  //Printf("Intercepting: select %d %p %p %p\n", nfds, readfds, writefds, exceptfds);
+  // Check for a mix of input and non-input, which cannot be done for now.
+  void *fd_sets[3] = {readfds, writefds, exceptfds};
+  bool has_input = false;
+  bool has_noninput = false;
+  for (int set = 0; set < 3; ++set) {
+    void *fd_set = fd_sets[set];
+    if (fd_set == nullptr) {
+      continue;
+    }
+    for (int fd = 0; fd < nfds; ++fd) {
+      if (FD_ISSET(fd, fd_set)) {
+        (input_fd_[fd] ? has_input : has_noninput) = true;
+      }
+    }
+  }
+  CHECK(!(has_input && has_noninput) && "Input and non-input in select()");
+  // Actual syscall.
+  typedef int (*select_t)(int, void *, void *, void *, void *);
+  select_t select_ = (select_t)select;
+  *ret = select_(nfds, readfds, writefds, exceptfds, timeout);
+  if (!has_input) {
+    return;
+  }
+  int errno_ = *__errno_location();
+  // Set dummy fd sets to replay into.
+  __sanitizer___kernel_fd_set readfds_, writefds_, exceptfds_;
+  void *params[5] = {ret, &errno_, &readfds_, &writefds_, &exceptfds_};
+  uptr param_size[5] =
+      {sizeof(sptr), sizeof(int), kMaxFd / 8, kMaxFd / 8, kMaxFd / 8};
+  // Manually set critical section and record/replay.
+  {
+    ScopedScheduler scoped(this, cur_thread());
+    DemoPlaySyscallNext("select", 5, params, param_size);
+    DemoRecordSyscallNext("select", 5, params, param_size);
+  }
+  // Using the fd_map, set the fds for the actual fd_sets.
+  void *fd_sets_[3] = {&readfds_, &writefds_, &exceptfds_};
+  for (int set = 0; set < 3; ++set) {
+    void *fd_set = fd_sets[set];
+    void *fd_set_ = fd_sets_[set];
+    if (fd_set == nullptr) {
+      continue;
+    }
+    FD_ZERO(fd_set);
+    for (int fd = 0; fd < kMaxFd; ++fd) {
+      if (FD_ISSET(fd, fd_set_)) {
+        FD_SET(fd_map_[fd], fd_set);
+      }
+    }
+  }
+}
 
 void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
   char path[256];
@@ -464,56 +715,66 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
 
 
 ////////////////////////////////////////
-// Other utilities.
+// PRNG utilities.
 ////////////////////////////////////////
 
-void Scheduler::Reschedule() {
-  mtx.Lock();
-  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_) {
-    reschedule_tick_ = tick_;
-    mtx.Unlock();
-    return;
-  }
-  // Linear search, which is OK as we only do it every 100ms.
-  for (int idx = 0; idx < last_free_idx_; ++idx) {
-    uptr cmp = kActive;
-    bool is_active =
-        atomic_compare_exchange_strong(&cond_vars_[cond_vars_idx_[idx]],
-                                       &cmp, kInactive, memory_order_relaxed);
-    if (!is_active) continue;
-    int next_tid = cond_vars_idx_[RandomNumber() % last_free_idx_];
-    CHECK(thread_status_[next_tid] == RUNNING);
-    atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
-    DemoRecordOverride(tick_ - 1, SCHEDULE, next_tid, 1);
-    break;
-  }
-  mtx.Unlock();
+u64 Scheduler::RandomNumber() {
+  // Reading from file only supports s64, not u64. So the MSB must be 0.
+  return xorshift128plus() >> 1;
 }
 
-// random -> play_demo -> record_demo
 u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
-  u64 return_param = RandomNumber();
+  if (exclude_point_[thr->tid] == 1) {
+    return 1;
+  }
+  if (DemoPlayActive() && tick_ > demo_play_.demo_tick_) {
+    DemoPlayNext();
+  }
+  u64 return_param;
   if (DemoPlayActive() && tick_ == demo_play_.demo_tick_) {
     CHECK(event_type == demo_play_.event_type_);
-    return_param = demo_play_.event_param_;
-    u64 rnd_skip = demo_play_.rnd_skip_;
-    if (event_type == SCHEDULE) {
-      return_param = cond_vars_idx_inv_[demo_play_.event_param_];
-    }
-    while (demo_play_.rnd_skip_-- > 0) {
-      RandomNumber();
-    }
-    DemoPlayNext();
-    DemoRecordNext(tick_, event_type, cond_vars_idx_[return_param], rnd_skip);
+    return_param = (u64)-1;
+    DemoRecordNext(
+        tick_, event_type, demo_play_.event_param_, demo_play_.rnd_skip_);
+  } else {
+    return_param = RandomNumber();
   }
   ++tick_;
   return return_param;
 }
 
+
+////////////////////////////////////////
+// Annotations.
+////////////////////////////////////////
+
+void Scheduler::AnnotateExcludeEnter() {
+  ThreadState *thr = cur_thread();
+  Wait(thr);
+  atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
+  exclude_point_[thr->tid] = 1;
+}
+
+void Scheduler::AnnotateExcludeExit() {
+  ThreadState *thr = cur_thread();
+  exclude_point_[thr->tid] = 0;
+  atomic_store(&cond_vars_[thr->tid], kCritical, memory_order_relaxed);
+  Tick(thr);
+}
+
+void Scheduler::AEx() { ctx->scheduler.AnnotateExcludeEnter(); }
+void Scheduler::ARe() { ctx->scheduler.AnnotateExcludeExit(); }
+
+
+////////////////////////////////////////
+// Other internal utilities.
+////////////////////////////////////////
+
 void Scheduler::Enable(int tid) {
   cond_vars_idx_[last_free_idx_] = tid;
   cond_vars_idx_inv_[tid] = last_free_idx_++;
   thread_status_[tid] = RUNNING;
+  pri_[tid] = kMaxPri;
 }
 
 void Scheduler::Disable(int tid) {
@@ -521,6 +782,30 @@ void Scheduler::Disable(int tid) {
   cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
   cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
   thread_status_[tid] = DISABLED;
+}
+
+void Scheduler::PrintUserSanitizerStackBoundary() {
+  ThreadState *thr = cur_thread();
+  if (thr->shadow_stack == 0) {
+    return;
+  }
+  Symbolizer *symbolizer = Symbolizer::GetOrInit();
+  // Get top of user stack.
+  uptr addr = thr->shadow_stack_pos[-1];
+  SymbolizedStack *stack = symbolizer->SymbolizePC(addr);
+  Printf("%s at %s:%d",
+      stack->info.function, stack->info.file, stack->info.line);
+  stack->ClearAll();
+  // Get bottom of sanitizer stack.
+  uhwptr *bp = (uhwptr *)GET_CURRENT_FRAME();
+  uhwptr pc = bp[1] + 0x40;
+  //while ((uptr)pc != addr) {
+  //  bp = (uhwptr *)bp[0];
+  //  pc = bp[1];
+  //}
+  stack = symbolizer->SymbolizePC((uptr)pc);
+  Printf(" -> %s", stack->info.function);
+  stack->ClearAll();
 }
 
 
@@ -555,9 +840,6 @@ void Scheduler::DemoPlayInitialise() {
     DemoPlaySignalNext(tid);
   }
   // SYSCALL setup
-  //for (int fd = 0; fd < 128; ++fd) {
-  //  demo_play_.syscall_fd_map_[fd] = fd;
-  //}
   internal_snprintf(buf, 128, "%s/SYSCALL", flags()->play_demo);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.syscall_contents_, &buffer_size, &contents_size));
@@ -617,7 +899,7 @@ void Scheduler::DemoPlaySignalNext(int tid) {
 
 void Scheduler::DemoPlaySyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
-  if (!/*DemoPlayActive()*/DemoPlayEnabled()) {
+  if (!/*DemoPlayActive()*/DemoPlayEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] == 1) {
     return;
   }
   uptr func_size = internal_strlen(func);
@@ -659,10 +941,10 @@ void Scheduler::DemoPlaySyscallNextCheck() {
   if (!/*DemoPlayActive()*/DemoPlayEnabled()) {
     return;
   }
-  const char * const syscalls[5] =
-      {"recvmsg", "recv", "poll", "ioctl", "connect"};
-  const uptr syssize[5] = {7, 4, 4, 5, 7};
-  for (uptr sys = 0; sys < 5; ++sys) {
+  const char * const syscalls[6] =
+      {"recvmsg", "recv", "poll", "ioctl", "connect", "time"};
+  const uptr syssize[6] = {7, 4, 4, 5, 7, 4};
+  for (uptr sys = 0; sys < 6; ++sys) {
     if (internal_strncmp(
         syscalls[sys], demo_play_.syscall_contents_, syssize[sys]) == 0) {
       return;
@@ -799,11 +1081,12 @@ void Scheduler::DemoRecordSignalLine(
   CHECK(written <= kLineLength);
   internal_memset(&buf[written], ' ', kLineLength - written - 1);
   buf[kLineLength - 1] = '\n';
+  buf[kLineLength] = '\0';
 }
 
 void Scheduler::DemoRecordSyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
-  if (!DemoRecordEnabled()) {
+  if (!DemoRecordEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] == 1) {
     return;
   }
   WriteToFile(demo_record_.syscall_fd_, func, internal_strlen(func));
