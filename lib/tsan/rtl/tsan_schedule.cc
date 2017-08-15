@@ -181,20 +181,23 @@ void Scheduler::Tick(ThreadState *thr) {
   bool is_critical = atomic_compare_exchange_strong(
       &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
   CHECK(is_critical);
-  // If annotated out, immedaitely reenable this thread.
-  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
-    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-    mtx.Unlock();
-    return;
-  }
-  if (pri_[thr->tid] > kMaxPri) {
-    --pri_[thr->tid];
-    //pri_[thr->tid] = kMaxPri;
-  }
   {
   Printf("%d - %d - ", thr->tid, tick_);
   PrintUserSanitizerStackBoundary();
   Printf("\n");
+  }
+  // If annotated out, immedaitely reenable this thread.
+//  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
+//    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
+//    mtx.Unlock();
+//    return;
+//  }
+if (tick_ == 15512) {
+Printf("Here\n");
+}
+  if (pri_[thr->tid] > kMaxPri) {
+    --pri_[thr->tid];
+    //pri_[thr->tid] = kMaxPri;
   }
   // Now to find the next tid to activate.
   int next_tid;
@@ -221,8 +224,8 @@ void Scheduler::Tick(ThreadState *thr) {
 
 void Scheduler::Reschedule() {
   mtx.Lock();
-  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_ ||
-      exclude_point_[active_tid_] == 1) {
+  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_/* ||
+      exclude_point_[active_tid_] == 1*/) {
     reschedule_tick_ = tick_;
     mtx.Unlock();
     return;
@@ -283,6 +286,7 @@ int Scheduler::Schedule(u64 rnd) {
 void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   ScopedScheduler scoped(this, thr);
   Enable(tid);
+//if (exclude_point_[thr->tid] == 1) {exclude_point_[tid] = 0;}
   if (thr->tid != tid) {
     atomic_store(&cond_vars_[tid], kInactive, memory_order_relaxed);
   }
@@ -291,6 +295,7 @@ void Scheduler::ThreadNew(ThreadState *thr, int tid) {
 void Scheduler::ThreadDelete(ThreadState *thr) {
   ScopedScheduler scoped(this, thr);
   Disable(thr->tid);
+//if (exclude_point_[thr->tid] == 1) {exclude_point_[thr->tid] = 0;}
   thread_status_[thr->tid] = FINISHED;
   int ptid = thr->tctx->parent_tid;
   // Wakes up parent thread if it is waiting for this thread to finish.
@@ -614,6 +619,16 @@ void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, S
   params[msg->msg_iovlen + 5] = &errno_;
   param_size[msg->msg_iovlen + 5] = sizeof(int);
   ScopedScheduler scoped(this, cur_thread());
+//if (tick_ == 1886 || tick_ == 1889 || tick_ == 1894 || tick_ == 1897 || tick_ == 1900 || tick_ == 1903) return;
+//if (tick_ == 1913) {  }
+//if (tick_ == 1896/* || tick_ == 1899 || tick_ == 1902 || tick_ == 1905*/) {
+static int t2entry = 0;
+if (cur_thread()->tid == 2){
+  ++t2entry;
+}
+if (cur_thread()->tid == 2 && t2entry == 3) {
+return;
+}
   DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
   msg->msg_controllen = param_size[msg->msg_iovlen + 3];
   DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
@@ -724,9 +739,9 @@ u64 Scheduler::RandomNumber() {
 }
 
 u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
-  if (exclude_point_[thr->tid] == 1) {
+  /*if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     return 1;
-  }
+  }*/
   if (DemoPlayActive() && tick_ > demo_play_.demo_tick_) {
     DemoPlayNext();
   }
@@ -751,14 +766,18 @@ u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
 void Scheduler::AnnotateExcludeEnter() {
   ThreadState *thr = cur_thread();
   Wait(thr);
+  exclude_point_[thr->tid] = thr->shadow_stack_pos[0];
   atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-  exclude_point_[thr->tid] = 1;
+  // Must tick here as if this thread is disabled, the first op in another
+  // thread will share the same tick as this, and if that op is in the replay
+  // file it will be scheduled over this.
+  ++tick_;
 }
 
 void Scheduler::AnnotateExcludeExit() {
   ThreadState *thr = cur_thread();
-  exclude_point_[thr->tid] = 0;
   atomic_store(&cond_vars_[thr->tid], kCritical, memory_order_relaxed);
+  exclude_point_[thr->tid] = 0;
   Tick(thr);
 }
 
@@ -775,6 +794,7 @@ void Scheduler::Enable(int tid) {
   cond_vars_idx_inv_[tid] = last_free_idx_++;
   thread_status_[tid] = RUNNING;
   pri_[tid] = kMaxPri;
+//if(exclude_point_[cur_thread()->tid]==1){exclude_point_[tid]=1;}
 }
 
 void Scheduler::Disable(int tid) {
@@ -796,13 +816,10 @@ void Scheduler::PrintUserSanitizerStackBoundary() {
   Printf("%s at %s:%d",
       stack->info.function, stack->info.file, stack->info.line);
   stack->ClearAll();
-  // Get bottom of sanitizer stack.
+  // Get bottom of sanitizer stack. It is almost always inside
+  // ~ScopedScheduler(), try to get out by jumping past it.
   uhwptr *bp = (uhwptr *)GET_CURRENT_FRAME();
   uhwptr pc = bp[1] + 0x40;
-  //while ((uptr)pc != addr) {
-  //  bp = (uhwptr *)bp[0];
-  //  pc = bp[1];
-  //}
   stack = symbolizer->SymbolizePC((uptr)pc);
   Printf(" -> %s", stack->info.function);
   stack->ClearAll();
@@ -899,7 +916,7 @@ void Scheduler::DemoPlaySignalNext(int tid) {
 
 void Scheduler::DemoPlaySyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
-  if (!/*DemoPlayActive()*/DemoPlayEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] == 1) {
+  if (!/*DemoPlayActive()*/DemoPlayEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] != 0) {
     return;
   }
   uptr func_size = internal_strlen(func);
@@ -1086,7 +1103,7 @@ void Scheduler::DemoRecordSignalLine(
 
 void Scheduler::DemoRecordSyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
-  if (!DemoRecordEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] == 1) {
+  if (!DemoRecordEnabled() || /*tsanstart == 0*/exclude_point_[cur_thread()->tid] != 0) {
     return;
   }
   WriteToFile(demo_record_.syscall_fd_, func, internal_strlen(func));
