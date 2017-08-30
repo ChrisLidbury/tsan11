@@ -159,6 +159,7 @@ class Scheduler {
   void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen, Syscallback *syscallback);
   void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);
   void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout, Syscallback *syscallback);
+  void SyscallRead(sptr *ret, int fd, void *buf, uptr count);
   void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags, Syscallback *syscallback);
   void SyscallRecvfrom(sptr *ret, int sockfd, void *buf, uptr len, int flags,
                        void *src_addr, int *addrlen, uptr addrlen_pre);

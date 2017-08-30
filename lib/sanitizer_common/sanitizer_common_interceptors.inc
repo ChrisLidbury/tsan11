@@ -778,6 +778,7 @@ INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"read
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
   SSIZE_T res = REAL(read)(fd, ptr, count);
+  __tsan::ctx->scheduler.SyscallRead(&res, fd, ptr, count);
   if (res > 0) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, res);
   if (res >= 0 && fd >= 0) COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
   return res;
@@ -3454,8 +3455,14 @@ INTERCEPTOR(int, ppoll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
   if (timeout_ts)
     COMMON_INTERCEPTOR_READ_RANGE(ctx, timeout_ts, struct_timespec_sz);
   // FIXME: read sigmask when all of sigemptyset, etc are intercepted.
-  int res =
-      COMMON_INTERCEPTOR_BLOCK_REAL(ppoll)(fds, nfds, timeout_ts, sigmask);
+  int res; int timeout = 0;
+  //__tsan::Scheduler::Syscallback3<
+  //    int, __sanitizer_pollfd *, __sanitizer_nfds_t, int> cb(
+  //    COMMON_INTERCEPTOR_BLOCK_REAL(poll), &res, fds, nfds, timeout);
+  //int res =
+  //    COMMON_INTERCEPTOR_BLOCK_REAL(ppoll)(fds, nfds, timeout_ts, sigmask);
+  //__tsan::ctx->scheduler.SyscallPoll(&res, fds, nfds, timeout, &cb);
+res = __interceptor_poll(fds, nfds, timeout);
   if (fds && nfds) write_pollfd(ctx, fds, nfds);
   return res;
 }

@@ -22,6 +22,16 @@ extern "C" int *__errno_location();
 #define FD_SET(fd, fds) (((u64 *)fds)[fd / 64] |= ((u64)1 << (fd % 64)))
 #define FD_ISSET(fd, fds) ((((u64 *)fds)[fd / 64] & ((u64)1 << (fd % 64))) != 0)
 
+// CMSG info
+/*#define CMSG_FIRSTHDR(msghdr) \
+    ((size_t) (msghdr)->msg_controllen >= sizeof (struct __sanitizer_cmsghdr) \
+    ? (struct __sanitizer_cmsghdr *) (mhdr)->msg_control \
+    : (struct __sanitizer_cmsghdr *) 0)
+#define CMSG_NXTHDR(msghdr, cmsg)
+#define CMSG_DATA(cmsg) ((void *) (&cmsg->cmsg_type + sizeof(int)))*/
+#define SOL_SOCKET 0x01
+#define SCM_RIGHTS 1
+
 // Only for POSIX.
 namespace __sanitizer {
 #define SEEK_SET 0
@@ -181,20 +191,23 @@ void Scheduler::Tick(ThreadState *thr) {
   bool is_critical = atomic_compare_exchange_strong(
       &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
   CHECK(is_critical);
-  {
-  Printf("%d - %d - ", thr->tid, tick_);
-  PrintUserSanitizerStackBoundary();
-  Printf("\n");
-  }
+
   // If annotated out, immedaitely reenable this thread.
-//  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
-//    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-//    mtx.Unlock();
-//    return;
-//  }
-if (tick_ == 15512) {
-Printf("Here\n");
-}
+  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
+    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
+    Printf("%d - %d - \n", thr->tid, tick_);
+    mtx.Unlock();
+    return;
+  }
+  { // DEBUG
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
+    if (tick_ == 12293 || tick_ == 4859) {
+      Printf("Here\n");
+    }
+  }
+
   if (pri_[thr->tid] > kMaxPri) {
     --pri_[thr->tid];
     //pri_[thr->tid] = kMaxPri;
@@ -224,8 +237,8 @@ Printf("Here\n");
 
 void Scheduler::Reschedule() {
   mtx.Lock();
-  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_/* ||
-      exclude_point_[active_tid_] == 1*/) {
+  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_ ||
+      exclude_point_[active_tid_] == 1) {
     reschedule_tick_ = tick_;
     mtx.Unlock();
     return;
@@ -287,6 +300,7 @@ void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   ScopedScheduler scoped(this, thr);
   Enable(tid);
 //if (exclude_point_[thr->tid] == 1) {exclude_point_[tid] = 0;}
+if (exclude_point_[thr->tid] == 1) {CHECK(false && "Create thread in exclusion.");}
   if (thr->tid != tid) {
     atomic_store(&cond_vars_[tid], kInactive, memory_order_relaxed);
   }
@@ -529,7 +543,6 @@ void Scheduler::SyscallIoctl(
 }
 
 void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout, Syscallback *syscallback) {
-  //Printf("Intercepting: poll");
   syscallback->Call();
   int errno_ = *__errno_location();
   __sanitizer_pollfd *poll_fds = (__sanitizer_pollfd *)fds;
@@ -539,33 +552,50 @@ void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout, Sys
   void *params[26] = {ret};
   uptr param_size[26] = {sizeof(int)};
   for (uptr p = 0; p < nfds; ++p) {
-    if (!input_fd_[poll_fds[0].fd]) {
-      continue;
+    if (/*!*/input_fd_[poll_fds[p].fd]) {
+      ++icount;//continue;
     }
-    params[2 * icount + 1] = &poll_fds[p].events;
-    param_size[2 * icount + 1] = sizeof(poll_fds[p].events);
-    params[2 * icount + 2] = &poll_fds[p].revents;
-    param_size[2 * icount + 2] = sizeof(poll_fds[p].revents);
-    ++icount;
+    params[2 * p/*icount*/ + 1] = &poll_fds[p].events;
+    param_size[2 * p/*icount*/ + 1] = sizeof(poll_fds[p].events);
+    params[2 * p/*icount*/ + 2] = &poll_fds[p].revents;
+    param_size[2 * p/*icount*/ + 2] = sizeof(poll_fds[p].revents);
+    //++icount;
   }
-  params[2 * icount + 1] = &errno_;
-  param_size[2 * icount + 1] = sizeof(int);
+  params[2 * nfds/*icount*/ + 1] = &errno_;
+  param_size[2 * nfds/*icount*/ + 1] = sizeof(int);
   if (icount == 0) {
     *__errno_location() = errno_;
     return;
   }
   // TODO If there is a mix on input fds and non-input fds.
   // Record another var that indicated if non-input fds unblocked thread.
-  CHECK(icount == nfds);
+  //CHECK(icount == nfds);
   ScopedScheduler scoped(this, cur_thread());
+//temp
+//if (icount != nfds) {
+//for (int p = 0; p < nfds; ++p)
+//input_fd_[poll_fds[p].fd] = true;
+//}
   DemoPlaySyscallNext("poll", 2 * nfds + 2, params, param_size);
   DemoRecordSyscallNext("poll", 2 * nfds + 2, params, param_size);
   *__errno_location() = errno_;
 }
 
+void Scheduler::SyscallRead(sptr *ret, int fd, void *buf, uptr count) {
+  int errno_ = *__errno_location();
+  if (!input_fd_[fd]) {
+    return;
+  } 
+  void *params[3] = {ret, buf, &errno_};
+  uptr param_size[3] = {sizeof(sptr), count, sizeof(int)};
+  ScopedScheduler(this, cur_thread());
+  DemoPlaySyscallNext("read", 3, params, param_size);
+  DemoRecordSyscallNext("read", 3, params, param_size);
+  *__errno_location() = errno_;
+}
+
 void Scheduler::SyscallRecv(
     sptr *ret, int sockfd, void *buf, uptr len, int flags, Syscallback *syscallback) {
- // Printf("Intercepting: recv\n");
   syscallback->Call();
   int errno_ = *__errno_location();
   if (!input_fd_[sockfd]) {
@@ -582,7 +612,6 @@ void Scheduler::SyscallRecv(
 void Scheduler::SyscallRecvfrom(
     sptr *ret, int sockfd, void *buf, uptr len, int flags,
     void *src_addr, int *addrlen, uptr addrlen_pre) {
-  //Printf("Intercepting: recvfrom\n");
   if (!input_fd_[sockfd]) {
     return;
   }
@@ -593,15 +622,40 @@ void Scheduler::SyscallRecvfrom(
   DemoRecordSyscallNext("recvfrom", 2, params, param_size);
 }
 
+static bool ReadCmsgHdr(void *msghdr, int *scm_fds, int *scm_fds_count) {
+  const unsigned kCmsgDataOffset =
+      RoundUpTo(sizeof(__sanitizer_cmsghdr), sizeof(uptr));
+  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;
+  char *p = (char *)((__sanitizer_msghdr *)msg)->msg_control;
+  char *const control_end = p + msg->msg_controllen;
+  bool has_ancilliary = false;
+  for (;;) {
+    if (p + sizeof(__sanitizer_cmsghdr) > control_end) break;
+    __sanitizer_cmsghdr *cmsg = (__sanitizer_cmsghdr *)p;
+    if (p + RoundUpTo(cmsg->cmsg_len, sizeof(uptr)) > control_end) break;
+    has_ancilliary = true;
+    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+      int *data = (int *)(p + kCmsgDataOffset);
+      int count = (cmsg->cmsg_len - kCmsgDataOffset) / sizeof(int);
+      CHECK(*scm_fds_count + count <= 10 && "Too many SCM_RIGHTS fds.");
+      for (int idx = 0; idx < count; ++idx) {
+        scm_fds[(*scm_fds_count)++] = data[idx];
+      }
+    }
+    p += RoundUpTo(cmsg->cmsg_len, sizeof(uptr));
+  }
+  return has_ancilliary;
+}
+
 void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, Syscallback *syscallback) {
-  //Printf("Intercepting: recvmsg %d\n", sockfd);
+  // Initial callback and setting up buffers.
   syscallback->Call();
   int errno_ = *__errno_location();
   if (!input_fd_[sockfd]) {
     return;
   }
   __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;
-  CHECK(msg->msg_iovlen <= 16 && "Error: too many buffers in recvmsg");
+  CHECK(msg->msg_iovlen <= 16 && "Error: too many buffers in recvmsg.");
   void *params[22] = {ret};
   uptr param_size[22] = {sizeof(sptr)};
   for (uptr p = 0; p < msg->msg_iovlen; ++p) {
@@ -610,28 +664,57 @@ void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, S
   }
   params[msg->msg_iovlen + 1] = msg->msg_name;
   param_size[msg->msg_iovlen + 1] = msg->msg_namelen;
-  params[msg->msg_iovlen + 2] = &param_size[msg->msg_iovlen + 3];
-  param_size[msg->msg_iovlen + 2] = sizeof(uptr);
-  params[msg->msg_iovlen + 3] = msg->msg_control;
-  param_size[msg->msg_iovlen + 3] = msg->msg_controllen;
-  params[msg->msg_iovlen + 4] = &msg->msg_flags;
-  param_size[msg->msg_iovlen + 4] = sizeof(int);
-  params[msg->msg_iovlen + 5] = &errno_;
+  params[msg->msg_iovlen + 2] = &msg->msg_flags;
+  param_size[msg->msg_iovlen + 2] = sizeof(int);
+  params[msg->msg_iovlen + 3] = &errno_;
+  param_size[msg->msg_iovlen + 3] = sizeof(int);
+
+  // Check for fds returned in cmsg/SOL_SOCKET/SCM_RIGHTS.
+  // If original returned ancillary, then must succeed and have ancilliary.
+  int scm_fds[10];
+  int scm_fds_count = 0;
+  int scm_fds_replay[10];
+  int scm_fds_count_replay = 0;
+  unsigned char has_ancilliary = 0;
+  unsigned char has_ancilliary_replay = 0;
+  params[msg->msg_iovlen + 4] = scm_fds_replay;
+  param_size[msg->msg_iovlen + 4] = sizeof(int) * 10;
+  params[msg->msg_iovlen + 5] = &scm_fds_count_replay;
   param_size[msg->msg_iovlen + 5] = sizeof(int);
+  params[msg->msg_iovlen + 6] = &has_ancilliary_replay;
+  param_size[msg->msg_iovlen + 6] = sizeof(unsigned char);
+
+  // If this is a non-replay record, then there will be no second callback, and
+  // the replay buffers should match the proper buffers.
+  if (*ret >= 0) {
+    has_ancilliary = ReadCmsgHdr(msg, scm_fds, &scm_fds_count);
+  }
+  internal_memcpy(scm_fds_replay, scm_fds, sizeof(int) * 10);
+  scm_fds_count_replay = scm_fds_count;
+  has_ancilliary_replay = has_ancilliary;
+
   ScopedScheduler scoped(this, cur_thread());
-//if (tick_ == 1886 || tick_ == 1889 || tick_ == 1894 || tick_ == 1897 || tick_ == 1900 || tick_ == 1903) return;
-//if (tick_ == 1913) {  }
-//if (tick_ == 1896/* || tick_ == 1899 || tick_ == 1902 || tick_ == 1905*/) {
-static int t2entry = 0;
-if (cur_thread()->tid == 2){
-  ++t2entry;
-}
-if (cur_thread()->tid == 2 && t2entry == 3) {
-return;
-}
-  DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
-  msg->msg_controllen = param_size[msg->msg_iovlen + 3];
-  DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 6, params, param_size);
+  DemoPlaySyscallNext("recvmsg", msg->msg_iovlen + 7, params, param_size);
+
+  // If the original run returned ancilliary data, then so must the replay.
+  CHECK(!(has_ancilliary && !has_ancilliary_replay) && "Unexpected ancilliary.");
+  if (has_ancilliary_replay) {
+    int retry_attempt = 0;
+    for (; *ret < 0 && retry_attempt < 10; ++retry_attempt) {
+      syscallback->Call();
+    }
+    scm_fds_count = 0;
+    has_ancilliary = ReadCmsgHdr(msg, scm_fds, &scm_fds_count);
+    CHECK((*ret >= 0 && has_ancilliary)
+        && "Expected ancilliary in recvmsg.");
+  }
+  CHECK(scm_fds_count == scm_fds_count_replay && "fds mismatch in SCM_RIGHTS.");
+  for (int idx = 0; idx < scm_fds_count; ++idx) {
+    input_fd_[scm_fds[idx]] = true;
+    fd_map_[scm_fds_replay[idx]] = scm_fds[idx];
+  }
+
+  DemoRecordSyscallNext("recvmsg", msg->msg_iovlen + 7, params, param_size);
   *__errno_location() = errno_;
 }
 
@@ -739,9 +822,9 @@ u64 Scheduler::RandomNumber() {
 }
 
 u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
-  /*if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
+  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     return 1;
-  }*/
+  }
   if (DemoPlayActive() && tick_ > demo_play_.demo_tick_) {
     DemoPlayNext();
   }
@@ -766,11 +849,12 @@ u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
 void Scheduler::AnnotateExcludeEnter() {
   ThreadState *thr = cur_thread();
   Wait(thr);
-  exclude_point_[thr->tid] = thr->shadow_stack_pos[0];
+  exclude_point_[thr->tid] = 1;
   atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
   // Must tick here as if this thread is disabled, the first op in another
   // thread will share the same tick as this, and if that op is in the replay
   // file it will be scheduled over this.
+  PrintUserSanitizerStackBoundary();
   ++tick_;
 }
 
@@ -795,6 +879,7 @@ void Scheduler::Enable(int tid) {
   thread_status_[tid] = RUNNING;
   pri_[tid] = kMaxPri;
 //if(exclude_point_[cur_thread()->tid]==1){exclude_point_[tid]=1;}
+if (exclude_point_[cur_thread()->tid] == 1) {CHECK(false && "Enable thread in exclusion.");}
 }
 
 void Scheduler::Disable(int tid) {
