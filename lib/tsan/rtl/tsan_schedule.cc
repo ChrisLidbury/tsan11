@@ -227,12 +227,15 @@ void Scheduler::Tick(ThreadState *thr) {
   } else {
     next_tid = Schedule(rnd);
   }
-  // Activate chosen next tid.
   CHECK(thread_status_[next_tid] == RUNNING ||
       (next_tid == 0 && last_free_idx_ == 0));
-  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
   active_tid_ = next_tid;
+  // Check for signals if replay.
+  SignalPending(thr);
+  // Activate chosen next tid.
+  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
   mtx.Unlock();
+  ProcessPendingSignals(thr);
 }
 
 void Scheduler::Reschedule() {
@@ -451,7 +454,61 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
   DemoRecordInitialise();
 }
 
+// Move the call to SignalPending to Wait().
+// Repeat call it in Wait().
+// 
 bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
+  mtx.Lock();
+  if (DemoPlayActive() &&
+      (demo_play_.signal_tick_[thr->tid] > tick_ ||
+       demo_play_.signal_num_[thr->tid] != signum)) {
+    mtx.Unlock();
+    return false;
+  }
+  // If the thread was blocked, it should go back to being blocked after, but
+  // only if the resource it was waiting on is still not free.
+  bool is_blocked = thread_status_[thr->tid] == DISABLED;
+  bool by_conditional = is_blocked && wait_tid_[thr->tid] == -1 &&
+      thread_mtx_[thr->tid] == 0 && thread_cond_[thr->tid] != 0;
+  if (is_blocked) {
+    if (!by_conditional) {
+      thread_cond_[thr->tid] = 0;  // Restrictive, but necessary for now. // TODO this is non deterministic
+    }
+if (!DemoPlayEnabled()) {
+    bool is_active = false;
+    while (!is_active) {
+      mtx.Unlock();
+      proc_yield(20);
+      uptr cmp = kActive;
+      mtx.Lock();
+      is_active = atomic_compare_exchange_strong(
+          &cond_vars_[active_tid_], &cmp, kInactive, memory_order_relaxed);
+    }
+    Enable(thr->tid);
+    int next_tid = Schedule(RandomNumber());
+    CHECK(thread_status_[next_tid] == RUNNING);
+    atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+    active_tid_ = next_tid;
+    DemoRecordOverride(tick_ - 1, SIG_WAKEUP, next_tid, 1);
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
+    ++tick_;
+}
+  }
+  // Standard Wait and Tick around entrance to signal handler.
+  mtx.Unlock();
+  Wait(thr);
+  mtx.Lock();
+  DemoRecordSignalNext(thr->tid, signal_tick_[thr->tid], signum);
+  DemoPlaySignalNext(thr->tid);
+  mtx.Unlock();
+  Tick(thr);
+  return true;
+}
+
+
+/*bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
   mtx.Lock();
   if (DemoPlayActive() &&
       demo_play_.signal_tick_[thr->tid] != signal_tick_[thr->tid]) {
@@ -477,21 +534,46 @@ bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
   mtx.Unlock();
   Tick(thr);
   return true;
-}
+}*/
+
+void rtl_internal_sighandler(int sig);
+void ProcessPendingSignals(ThreadState *thr);
 
 void Scheduler::SignalPending(ThreadState *thr) {
-  ++signal_tick_[thr->tid];
-  if (DemoPlayActive() &&
-      demo_play_.signal_tick_[thr->tid] == signal_tick_[thr->tid]) {
-    //Wait(thr);
-    for (int signal = 1, signals = demo_play_.signal_num_[thr->tid];
-         signals > 0;
-         ++signal, signals >>= 1) {
-      if (signals & 1) {
-        raise(signal);
+  signal_tick_[thr->tid] = tick_;
+  if (!DemoPlayEnabled()) {
+    return;
+  }
+  // First see if the next time this thread Wait()s is for signal and raise.
+  if (demo_play_.signal_tick_[thr->tid] == tick_) {
+    rtl_internal_sighandler(demo_play_.signal_num_[thr->tid]);
+  }
+  // Now see if another thread needs to be unblocked.
+  //TODO This should go first.
+  // Temp until demo stuff is sorted.
+  if (DemoPlayActive() && tick_ > demo_play_.demo_tick_) {
+    DemoPlayNext();
+  }
+  while (demo_play_.event_type_ == SIG_WAKEUP &&
+         demo_play_.demo_tick_ == tick_) {
+    for (u64 demo_skip = demo_play_.rnd_skip_; demo_skip > 0; --demo_skip) {
+      int skip_tid = Schedule(RandomNumber());
+      if (pri_[skip_tid] < kMinPri) {
+        ++pri_[skip_tid];
       }
     }
+    Enable(demo_play_.event_param_);
+    active_tid_ = Schedule(RandomNumber());
+   // atomic_store(&cond_vars_[active_tid_], kActive, memory_order_relaxed);
+    DemoRecordNext(
+        tick_, SIG_WAKEUP, demo_play_.event_param_, demo_play_.rnd_skip_);
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
+    ++tick_;
   }
+  // Now see if a thread needs to be blocked.
+  //TODO
 }
 
 bool Scheduler::SyscallIsInputFd(const char *addr, uptr addrlen) {
@@ -990,6 +1072,9 @@ bool Scheduler::DemoPlayExpectParam2(u64 param2) {
 }
 
 void Scheduler::DemoPlaySignalNext(int tid) {
+  if (!DemoPlayEnabled()) {
+    return;
+  }
   int signal_tid = internal_simple_strtoll(
       demo_play_.signal_contents_, &demo_play_.signal_contents_, 10);
   CHECK(signal_tid == tid && "Error: Signal file has desynchronised");
@@ -1078,9 +1163,9 @@ void Scheduler::DemoRecordInitialise() {
   for (int tid = 0; tid < kNumThreads; ++tid) {
     demo_record_.signal_file_pos_[tid] =
         internal_lseek(demo_record_.signal_fd_, 0, SEEK_CUR);
-    demo_record_.signal_tick_[tid] = -1;
+    demo_record_.signal_tick_[tid] = 0/*-1*/;
     demo_record_.signal_num_[tid] = 0;
-    DemoRecordSignalLine(buf, tid, -1, 0);
+    DemoRecordSignalLine(buf, tid, 0/*-1*/, 0);
     WriteToFile(demo_record_.signal_fd_, buf, internal_strlen(buf));
   }
   // SYSCALL setup
@@ -1097,14 +1182,14 @@ void Scheduler::DemoRecordFinalise() {
   DemoRecordNext(tick_, END, 0, 0);
   // Signal
   for (int tid = 0; tid < kNumThreads; ++tid) {
-    if (demo_record_.signal_tick_[tid] != (u64)-1) {
+ //   if (demo_record_.signal_tick_[tid] != (u64)0/*-1*/) {
       internal_lseek(demo_record_.signal_fd_,
           demo_record_.signal_file_pos_[tid], SEEK_SET);
       char line[65];
       DemoRecordSignalLine(line,
-          tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]);
+          tid,0,0/*tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]*/);
       WriteToFile(demo_record_.signal_fd_, line, 64);
-    }
+ //   }
   }
 }
 
@@ -1136,7 +1221,7 @@ void Scheduler::DemoRecordOverride(
   }
   if (demo_record_.demo_tick_ == tick) {
     // If the current tick has demo information.
-    CHECK(demo_record_.event_type_ == type);
+    CHECK(demo_record_.event_type_ == type); // This will fail.
     demo_record_.event_param_ = param;
     demo_record_.rnd_skip_ += rnd_skip;
   } else {
@@ -1146,6 +1231,32 @@ void Scheduler::DemoRecordOverride(
 }
 
 void Scheduler::DemoRecordSignalNext(int tid, u64 signal_tick, int signum) {
+  if (!DemoRecordEnabled()) {
+    return;
+  }
+  // If no signal for this thread has been recorded yet.
+  if (demo_record_.signal_tick_[tid] == 0) {
+    demo_record_.signal_tick_[tid] = signal_tick;
+    demo_record_.signal_num_[tid] = signum;
+ //   return;
+  }
+  // Save current signal file pos and move to previously saved point.
+  uptr restore = internal_lseek(demo_record_.signal_fd_, 0, SEEK_CUR);
+  internal_lseek(demo_record_.signal_fd_,
+      demo_record_.signal_file_pos_[tid], SEEK_SET);
+  // Write the previous entry.
+  char line[65];
+  DemoRecordSignalLine(line,
+      tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]);
+  WriteToFile(demo_record_.signal_fd_, line, 64);
+  // Go back to original position and reserve spot.
+  internal_lseek(demo_record_.signal_fd_, restore, SEEK_SET);
+  demo_record_.signal_file_pos_[tid] = restore;
+  DemoRecordSignalLine(line, tid, -1, 0);
+  WriteToFile(demo_record_.signal_fd_, line, 64);
+}
+
+/*void Scheduler::DemoRecordSignalNext(int tid, u64 signal_tick, int signum) {
   if (!DemoRecordEnabled()) {
     return;
   }
@@ -1173,7 +1284,7 @@ void Scheduler::DemoRecordSignalNext(int tid, u64 signal_tick, int signum) {
     demo_record_.signal_num_[tid] = 0;
   }
   demo_record_.signal_num_[tid] |= (1 << (signum - 1));
-}
+}*/
 
 void Scheduler::DemoRecordSignalLine(
     char *buf, int tid, u64 signal_tick, int signum) {

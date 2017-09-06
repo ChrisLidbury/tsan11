@@ -198,7 +198,7 @@ class Scheduler {
   // This will handle record and replay.
   // Has same limitations as calling RandomNumber().
   enum EventType { END = 0,     SCHEDULE = 1, READ = 2, COND_SIGNAL = 3,
-                   PROCESS = 4, FILE = 5,     MMAP = 6, SIGNAL = 7 };
+                   PROCESS = 4, FILE = 5,     MMAP = 6, SIG_WAKEUP = 7 };
   u64 RandomNext(ThreadState *thr, EventType event_type);
 
 
@@ -248,9 +248,9 @@ class Scheduler {
     u64 rnd_skip_;          // Skip this many calls to the RNG.
     char *demo_contents_;   // Raw demo contents.
     // Signal replaying.
-    u64 signal_tick_[kNumThreads];  // Next signal tick.
-    u32 signal_num_[kNumThreads];   // Next signal numbers.
-    char *signal_contents_;         // Signal replay file.
+    u64 signal_tick_[kNumThreads];    // Next signal tick.
+    int signal_num_[kNumThreads];     // Next signal numbers.
+    char *signal_contents_;           // Signal replay file.
     // Syscall replaying.
     //int syscall_fd_map_[128];  // Map replay fds to real fds.
     char *syscall_contents_;   // Syscall replay file.
@@ -264,7 +264,7 @@ class Scheduler {
   // Is demo playback active.
   bool DemoPlayActive();   // Enabled and not at end.
   bool DemoPlayEnabled();  // Enabled, maybe at end.
-  // Assert demo state.
+  // Assert demo state. //TODO rest of these don't currently work.
   void DemoPlayCheck(
       u64 demo_tick, EventType event_type, u64 param1, u64 param2);
   bool DemoPlayExpectParam1(u64 param1);
@@ -293,7 +293,7 @@ class Scheduler {
     // therefore be saved and written to when the next signal is recorded.
     int signal_file_pos_[kNumThreads];  // Signal file position for next signal.
     u64 signal_tick_[kNumThreads];      // Signal tick of first signal received.
-    u32 signal_num_[kNumThreads];       // Signal nums of first signal received.
+    int signal_num_[kNumThreads];       // Signal nums of first signal received.
     fd_t signal_fd_;
     // Syscall recording.
     // Each syscall requires different parameters to be stored.

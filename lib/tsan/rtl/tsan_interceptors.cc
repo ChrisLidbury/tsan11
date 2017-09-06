@@ -1925,7 +1925,7 @@ static void CallUserSignalHandler(ThreadState *thr, bool sync, bool acquire,
 
 void ProcessPendingSignals(ThreadState *thr) {
   // Scheduler call. For replay, check for sending signals.
-  ::ctx->scheduler.SignalPending(thr);
+  //::ctx->scheduler.SignalPending(thr);
   //
   ThreadSignalContext *sctx = SigCtx(thr);
   if (sctx == 0 ||
@@ -2021,6 +2021,13 @@ static void rtl_sighandler(int sig) {
 
 static void rtl_sigaction(int sig, my_siginfo_t *info, void *ctx) {
   rtl_generic_sighandler(true, sig, info, ctx);
+}
+
+// temp for internal use.
+namespace __tsan {
+void rtl_internal_sighandler(int sig) {
+  rtl_generic_sighandler(false, sig, 0, 0);
+}
 }
 
 TSAN_INTERCEPTOR(int, sigaction, int sig, sigaction_t *act, sigaction_t *old) {
