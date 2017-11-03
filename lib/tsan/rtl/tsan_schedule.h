@@ -131,40 +131,20 @@ class Scheduler {
   // Some of them will need to be ordered, and thus do the wait'n'tick. Each
   // will also need their own syscall epoch to ensure that what we replay lines
   // up with when it was recorded.
-  struct Syscallback {
-    virtual void Call() = 0;
-    virtual ~Syscallback() {}
-  };
-  template<typename Ret, typename P1, typename P2, typename P3>
-  struct Syscallback3 : public Syscallback {
-    typedef Ret(*CallType)(P1, P2, P3);
-    Syscallback3(CallType f, Ret *ret, P1 p1, P2 p2, P3 p3)
-        : f(f), ret(ret), p1(p1), p2(p2), p3(p3) {
-    }
-    void Call() { *ret = f(p1, p2, p3); }
-    CallType f; Ret *ret; P1 p1; P2 p2; P3 p3;
-  };
-  template<typename Ret, typename P1, typename P2, typename P3, typename P4>
-  struct Syscallback4 : public Syscallback {
-    typedef Ret(*CallType)(P1, P2, P3, P4);
-    Syscallback4(CallType f, Ret *ret, P1 p1, P2 p2, P3 p3, P4 p4)
-        : f(f), ret(ret), p1(p1), p2(p2), p3(p3), p4(p4) {
-    }
-    void Call() { *ret = f(p1, p2, p3, p4); }
-    CallType f; Ret *ret; P1 p1; P2 p2; P3 p3; P4 p4;
-  };
-
   bool SyscallIsInputFd(const char *addr, uptr addrlen);
 
-  void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen, Syscallback *syscallback);
+  void SyscallBind(int *ret, int fd, void *addr, uptr addrlen);
+  void SyscallClock_gettime(int *ret, void *tp);
+  void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen);
+  void SyscallGettimeofday(int *ret, void *tv, void *tz);
   void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);
-  void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout, Syscallback *syscallback);
+  void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout);
   void SyscallRead(sptr *ret, int fd, void *buf, uptr count);
-  void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags, Syscallback *syscallback);
+  void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags);
   void SyscallRecvfrom(sptr *ret, int sockfd, void *buf, uptr len, int flags,
                        void *src_addr, int *addrlen, uptr addrlen_pre);
-  void SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, Syscallback *syscallback);
-  void SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags, Syscallback *syscallback);
+  void SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, void *recvmsg);
+  void SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags);
   void SyscallSelect(int *ret, int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, void *select);
 
   // File stuff uuuggghhhghghghhhhh.
@@ -261,6 +241,7 @@ class Scheduler {
   void DemoPlayInitialise();
   // Parse next event from file during demo playback.
   void DemoPlayNext();
+  void DemoPlayPeekNext();
   // Is demo playback active.
   bool DemoPlayActive();   // Enabled and not at end.
   bool DemoPlayEnabled();  // Enabled, maybe at end.
@@ -361,17 +342,17 @@ class Scheduler {
 
   // Auxilliary info for the scheduling strategy.
   // Prioity based scheduling. Slightly adjust when repeatedly rescheduling.
-  static const int kMaxPri = -3;
+  static const int kMaxPri = -300;
   static const int kMinPri = 3;
   int pri_[kNumThreads];
-
+public:
   // Info for blocked threads.
   enum Status { FINISHED = 0, DISABLED = 1, CONDITIONAL = 2, RUNNING = 3 };
   Status thread_status_[kNumThreads];
   int wait_tid_[kNumThreads];                   // For thread join
   atomic_uintptr_t *thread_cond_[kNumThreads];  // For conditionals
   atomic_uintptr_t *thread_mtx_[kNumThreads];   // For mutex lock TODO merge with cond.
-
+private:
   // For signals, each thread has an epoch for determinism.
   u64 signal_tick_[kNumThreads];
 

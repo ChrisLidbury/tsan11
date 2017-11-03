@@ -680,6 +680,76 @@ TSAN_INTERCEPTOR(char*, strdup, const char *str) {
   return REAL(strdup)(str);
 }
 
+// For tsan record/replay.
+// stdin reads.
+
+TSAN_INTERCEPTOR(int, _IO_getc, void *stream) {
+  SCOPED_TSAN_INTERCEPTOR(_IO_getc, stream);
+  int res = REAL(_IO_getc)(stream);
+  sptr ret = sizeof(int);
+  int fd = 0;
+  void *buf = &res;
+  uptr count = sizeof(int);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  return res;
+}
+
+TSAN_INTERCEPTOR(int, fgetc, void *stream) {
+  SCOPED_TSAN_INTERCEPTOR(fgetc, stream);
+  int res = REAL(fgetc)(stream);
+  sptr ret = sizeof(int);
+  int fd = 0;
+  void *buf = &res;
+  uptr count = sizeof(int);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  return res;
+}
+
+TSAN_INTERCEPTOR(char *, gets, char *str) {
+  SCOPED_TSAN_INTERCEPTOR(gets, str);
+  CHECK(false && "Cannot handle 'gets'");
+  return nullptr;
+}
+
+// TODO feof
+TSAN_INTERCEPTOR(char *, fgets, char *str, int num, void *stream) {
+  SCOPED_TSAN_INTERCEPTOR(fgets, str, num, stream);
+  char *res = REAL(fgets)(str, num, stream);
+  sptr ret = res == nullptr ? 0 : 1;
+  int fd = fileno_unlocked(stream);
+  void *buf = str;
+  uptr count = num;
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  res = ret == 0 ? nullptr : str;
+  return res;
+}
+
+// TODO feof and ferror
+TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr count, void *stream) {
+  SCOPED_TSAN_INTERCEPTOR(fread, ptr, size, count, stream);
+  uptr res = REAL(fread)(ptr, size, count, stream);
+  sptr ret = res;
+  int fd = fileno_unlocked(stream);
+  void *buf = ptr;
+  uptr count_ = size * count;
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count_);
+  return ret;
+}
+
+// TODO feof and ferror
+TSAN_INTERCEPTOR(int, getchar) {
+  SCOPED_TSAN_INTERCEPTOR(getchar);
+  int res = REAL(getchar)();
+  sptr ret = sizeof(int);
+  int fd = 0;
+  void *buf = &res;
+  uptr count = sizeof(int);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  return res;
+}
+
+// end.
+
 static bool fix_mmap_addr(void **addr, long_t sz, int flags) {
   if (*addr) {
     if (!IsAppMem((uptr)*addr) || !IsAppMem((uptr)*addr + sz - 1)) {
@@ -1590,11 +1660,8 @@ TSAN_INTERCEPTOR(int, socketpair, int domain, int type, int protocol, int *fd) {
 TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {
   SCOPED_TSAN_INTERCEPTOR(connect, fd, addr, addrlen);
   FdSocketConnecting(thr, pc, fd);
-  int res;
-  __tsan::Scheduler::Syscallback3<int, int, void *, unsigned> cb(
-      REAL(connect), &res, fd, addr, addrlen);
-  //int res = REAL(connect)(fd, addr, addrlen);
-  __tsan::ctx->scheduler.SyscallConnect(&res, fd, addr, addrlen, &cb);
+  int res = REAL(connect)(fd, addr, addrlen);
+  __tsan::ctx->scheduler.SyscallConnect(&res, fd, addr, addrlen);
   if (res == 0 && fd >= 0)
     FdSocketConnect(thr, pc, fd);
   return res;
@@ -1603,6 +1670,7 @@ TSAN_INTERCEPTOR(int, connect, int fd, void *addr, unsigned addrlen) {
 TSAN_INTERCEPTOR(int, bind, int fd, void *addr, unsigned addrlen) {FCHECK(false&&"bind");
   SCOPED_TSAN_INTERCEPTOR(bind, fd, addr, addrlen);
   int res = REAL(bind)(fd, addr, addrlen);
+  __tsan::ctx->scheduler.SyscallBind(&res, fd, addr, addrlen);
   if (fd > 0 && res == 0)
     FdAccess(thr, pc, fd);
   return res;
@@ -1715,14 +1783,14 @@ TSAN_INTERCEPTOR(void*, tmpfile64, int fake) {FCHECK(false&&"tmpfile64");
 #define TSAN_MAYBE_INTERCEPT_TMPFILE64
 #endif
 
-TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr nmemb, void *f) {//FCHECK(false&&"fread");
+/*TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr nmemb, void *f) {//FCHECK(false&&"fread");
   // libc file streams can call user-supplied functions, see fopencookie.
   {
     SCOPED_TSAN_INTERCEPTOR(fread, ptr, size, nmemb, f);
     MemoryAccessRange(thr, pc, (uptr)ptr, size * nmemb, true);
   }
   return REAL(fread)(ptr, size, nmemb, f);
-}
+}*/
 
 TSAN_INTERCEPTOR(uptr, fwrite, const void *p, uptr size, uptr nmemb, void *f) {FCHECK(false&&"fwrite");
   // libc file streams can call user-supplied functions, see fopencookie.
@@ -2125,7 +2193,9 @@ TSAN_INTERCEPTOR(int, pthread_kill, void *tid, int sig) {
 TSAN_INTERCEPTOR(int, gettimeofday, void *tv, void *tz) {//FCHECK(false&&"gettimeofday");
   SCOPED_TSAN_INTERCEPTOR(gettimeofday, tv, tz);
   // It's intercepted merely to process pending signals.
-  return REAL(gettimeofday)(tv, tz);
+  int ret = REAL(gettimeofday)(tv, tz);
+  __tsan::ctx->scheduler.SyscallGettimeofday(&ret, tv, tz);
+  return ret;
 }
 
 TSAN_INTERCEPTOR(int, getaddrinfo, void *node, void *service,
@@ -2658,6 +2728,13 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(strncpy);
   TSAN_INTERCEPT(strdup);
 
+  TSAN_INTERCEPT(_IO_getc);
+  TSAN_INTERCEPT(fgetc);
+  TSAN_INTERCEPT(gets);
+  TSAN_INTERCEPT(fgets);
+  TSAN_INTERCEPT(fread);
+  TSAN_INTERCEPT(getchar);
+
   TSAN_INTERCEPT(pthread_create);
   TSAN_INTERCEPT(pthread_join);
   TSAN_INTERCEPT(pthread_detach);
@@ -2695,7 +2772,6 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(pthread_barrier_wait);
 
   TSAN_INTERCEPT(pthread_once);
-
   TSAN_INTERCEPT(fstat);
   TSAN_MAYBE_INTERCEPT___FXSTAT;
   TSAN_MAYBE_INTERCEPT_FSTAT64;
@@ -2727,7 +2803,7 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(unlink);
   TSAN_INTERCEPT(tmpfile);
   TSAN_MAYBE_INTERCEPT_TMPFILE64;
-  TSAN_INTERCEPT(fread);
+ // TSAN_INTERCEPT(fread);
   TSAN_INTERCEPT(fwrite);
   TSAN_INTERCEPT(abort);
   TSAN_INTERCEPT(puts);

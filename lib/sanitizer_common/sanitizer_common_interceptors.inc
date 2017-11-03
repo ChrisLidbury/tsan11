@@ -769,7 +769,7 @@ static void read_iovec(void *ctx, struct __sanitizer_iovec *iovec,
 }
 #endif
 
-#if SANITIZER_INTERCEPT_READ
+//#if SANITIZER_INTERCEPT_READ
 INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"read");
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, read, fd, ptr, count);
@@ -784,9 +784,9 @@ INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"read
   return res;
 }
 #define INIT_READ COMMON_INTERCEPT_FUNCTION(read)
-#else
-#define INIT_READ
-#endif
+//#else
+//#define INIT_READ
+//#endif
 
 #if SANITIZER_INTERCEPT_PREAD
 INTERCEPTOR(SSIZE_T, pread, int fd, void *ptr, SIZE_T count, OFF_T offset) {FCHECK(false&&"pread");
@@ -1857,6 +1857,7 @@ INTERCEPTOR(int, clock_gettime, u32 clk_id, void *tp) {FCHECK(false&&"clock_gett
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
   int res = REAL(clock_gettime)(clk_id, tp);
+  __tsan::ctx->scheduler.SyscallClock_gettime(&res, tp);
   if (!res) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, tp, struct_timespec_sz);
   }
@@ -2580,12 +2581,8 @@ INTERCEPTOR(SSIZE_T, recvmsg, int fd, struct __sanitizer_msghdr *msg,
   for (uptr p = 0; p < msg->msg_iovlen; ++p) {
     internal_memset(msg->msg_iov[p].iov_base, 0, msg->msg_iov[p].iov_len);
   }
-  SSIZE_T res;
-  __tsan::Scheduler::Syscallback3<
-      SSIZE_T, int, struct __sanitizer_msghdr *, int> cb(
-          REAL(recvmsg), &res, fd, msg, flags);
-  //SSIZE_T res = REAL(recvmsg)(fd, msg, flags);
-  __tsan::ctx->scheduler.SyscallRecvmsg(&res, fd, msg, flags, &cb);
+  SSIZE_T res;// = REAL(recvmsg)(fd, msg, flags);
+  __tsan::ctx->scheduler.SyscallRecvmsg(&res, fd, msg, flags, (void *)REAL(recvmsg));
   if (res >= 0) {
     if (fd >= 0) COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
     if (msg) {
@@ -2659,12 +2656,8 @@ INTERCEPTOR(SSIZE_T, sendmsg, int fd, struct __sanitizer_msghdr *msg,
     COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
     COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd);
   }
-  SSIZE_T res;
-  __tsan::Scheduler::Syscallback3<
-      SSIZE_T, int, __sanitizer_msghdr *, int> cb(
-      REAL(sendmsg), &res, fd, msg, flags);
-  //SSIZE_T res = REAL(sendmsg)(fd, msg, flags);
-  __tsan::ctx->scheduler.SyscallSendmsg(&res, fd, msg, flags, &cb);
+  SSIZE_T res = REAL(sendmsg)(fd, msg, flags);
+  __tsan::ctx->scheduler.SyscallSendmsg(&res, fd, msg, flags);
   if (common_flags()->intercept_send && res >= 0 && msg)
     read_msghdr(ctx, msg, res);
   return res;
@@ -3432,12 +3425,8 @@ INTERCEPTOR(int, poll, __sanitizer_pollfd *fds, __sanitizer_nfds_t nfds,
   COMMON_INTERCEPTOR_ENTER(ctx, poll, fds, nfds, timeout);
   if (fds && nfds) read_pollfd(ctx, fds, nfds);
   if (timeout < 0) timeout = 100;
-  int res;
-  __tsan::Scheduler::Syscallback3<
-      int, __sanitizer_pollfd *, __sanitizer_nfds_t, int> cb(
-      COMMON_INTERCEPTOR_BLOCK_REAL(poll), &res, fds, nfds, timeout);
-  //int res = COMMON_INTERCEPTOR_BLOCK_REAL(poll)(fds, nfds, timeout);
-  __tsan::ctx->scheduler.SyscallPoll(&res, fds, nfds, timeout, &cb);
+  int res = COMMON_INTERCEPTOR_BLOCK_REAL(poll)(fds, nfds, timeout);
+  __tsan::ctx->scheduler.SyscallPoll(&res, fds, nfds, timeout);
   if (fds && nfds) write_pollfd(ctx, fds, nfds);
   return res;
 }
@@ -5597,10 +5586,23 @@ INTERCEPTOR(int, sem_destroy, __sanitizer_sem_t *s) {
   return res;
 }
 
+DECLARE_REAL(int, sem_trywait, __sanitizer_sem_t *s)
+
 INTERCEPTOR(int, sem_wait, __sanitizer_sem_t *s) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sem_wait, s);
-  int res = COMMON_INTERCEPTOR_BLOCK_REAL(sem_wait)(s);
+// Quick rough implementation based on mutex lock.
+  int res = -1;
+  while (res != 0) {
+    __tsan::ctx->scheduler.Wait(thr);
+    res = REAL(sem_trywait)(s);
+    if (res != 0) {
+      __tsan::ctx->scheduler.MutexLockFail(thr, s);
+    }
+    __tsan::ctx->scheduler.Tick(thr);
+  }
+//
+  //int res = COMMON_INTERCEPTOR_BLOCK_REAL(sem_wait)(s);
   if (res == 0) {
     COMMON_INTERCEPTOR_ACQUIRE(ctx, (uptr)s);
   }
@@ -5618,6 +5620,9 @@ INTERCEPTOR(int, sem_trywait, __sanitizer_sem_t *s) {
 }
 
 INTERCEPTOR(int, sem_timedwait, __sanitizer_sem_t *s, void *abstime) {
+  // TODO this function is incredibly retarded, use sem_wait for now.
+  return __interceptor_sem_wait(s);
+  // unreachable
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sem_timedwait, s, abstime);
   COMMON_INTERCEPTOR_READ_RANGE(ctx, abstime, struct_timespec_sz);
@@ -5631,8 +5636,15 @@ INTERCEPTOR(int, sem_timedwait, __sanitizer_sem_t *s, void *abstime) {
 INTERCEPTOR(int, sem_post, __sanitizer_sem_t *s) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, sem_post, s);
+// Quick rough implementation based on mutex unlock.
+  __tsan::ctx->scheduler.Wait(thr);
+//
   COMMON_INTERCEPTOR_RELEASE(ctx, (uptr)s);
   int res = REAL(sem_post)(s);
+//
+  __tsan::ctx->scheduler.MutexUnlock(thr, s);
+  __tsan::ctx->scheduler.Tick(thr);
+//
   return res;
 }
 
@@ -5769,12 +5781,8 @@ INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) { /* Schedu
   COMMON_INTERCEPTOR_ENTER(ctx, recv, fd, buf, len, flags);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
   internal_memset(buf, 0, len);
-  SSIZE_T res;
-  __tsan::Scheduler::Syscallback4<
-      SSIZE_T, int, void *, SIZE_T, int> cb(
-      REAL(recv), &res, fd, buf, len, flags);
-  //SSIZE_T res = REAL(recv)(fd, buf, len, flags);
-  __tsan::ctx->scheduler.SyscallRecv(&res, fd, buf, len, flags, &cb);
+  SSIZE_T res = REAL(recv)(fd, buf, len, flags);
+  __tsan::ctx->scheduler.SyscallRecv(&res, fd, buf, len, flags);
   if (res > 0) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, buf, Min((SIZE_T)res, len));
   }
@@ -5954,6 +5962,20 @@ INTERCEPTOR(int, __lxstat64, int version, const char *path, void *buf) {FCHECK(f
 #endif
 
 // FIXME: add other *stat interceptor
+
+/*INTERCEPTOR(int, _IO_getc, void *stream) {
+  //SCOPED_TSAN_INTERCEPTOR(getc, stream);
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, _IO_getc, stream);
+  int res = REAL(_IO_getc)(stream);
+  sptr ret = sizeof(int);
+  int fd = 0;
+  void *buf = &res;
+  uptr count = sizeof(int);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  return res;
+}
+#define INIT_GETC COMMON_INTERCEPT_FUNCTION(_IO_getc);*/
 
 static void InitializeCommonInterceptors() {
   static u64 metadata_mem[sizeof(MetadataHashMap) / sizeof(u64) + 1];
@@ -6150,5 +6172,6 @@ static void InitializeCommonInterceptors() {
   INIT___XSTAT64;
   INIT___LXSTAT;
   INIT___LXSTAT64;
+  //INIT__IO_GETC;
   // FIXME: add other *stat interceptors.
 }
