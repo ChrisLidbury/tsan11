@@ -1869,7 +1869,9 @@ TSAN_INTERCEPTOR(int, epoll_wait, int epfd, void *ev, int cnt, int timeout) {FCH
   SCOPED_TSAN_INTERCEPTOR(epoll_wait, epfd, ev, cnt, timeout);
   if (epfd >= 0)
     FdAccess(thr, pc, epfd);
+timeout=100;
   int res = BLOCK_REAL(epoll_wait)(epfd, ev, cnt, timeout);
+  __tsan::ctx->scheduler.SyscallEpoll_wait(&res, epfd, ev, cnt, timeout);
   if (res > 0 && epfd >= 0)
     FdAcquire(thr, pc, epfd);
   return res;

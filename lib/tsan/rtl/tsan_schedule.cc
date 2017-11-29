@@ -42,6 +42,26 @@ void ProcessPendingSignals(ThreadState *thr);
 #define SOL_SOCKET 0x01
 #define SCM_RIGHTS 1
 
+/*namespace __tsan {
+// For epoll_wait.
+typedef union epoll_data
+{
+  void *ptr;
+  int fd;
+  u32 u32_;
+  u64 u64_;
+} epoll_data_t;
+
+struct epoll_event
+{
+  u32 events;
+  epoll_data_t data;
+};
+}*/  // namespace __tsan
+
+// For accept.
+extern "C" int dup(int fd);
+
 // Only for POSIX.
 namespace __sanitizer {
 #define SEEK_SET 0
@@ -78,7 +98,6 @@ u64 xorshift128plus() {
   s[1] = x ^ y ^ (x >> 17) ^ (y >> 26);  // b, c
   return s[1] + y;
 }
-u64 s_rng_count = 0;
 
 }  // namespace
 
@@ -150,7 +169,7 @@ void Scheduler::Initialise() {
 
   // Shared memory init.
   /*static const*/ int key = ('t' << 24) | ('s' << 16) | ('a' << 8) | 'n';
-  key ^= (int)(internal_getpid() & (int)-1);
+  //key ^= (int)(internal_getpid() & (int)-1);
   int id = shmget(key, sizeof(ShmProcess), 0777);
   if (id != -1) {
     int value = shmctl(id, IPC_RMID, 0);
@@ -194,7 +213,7 @@ void Scheduler::Wait(ThreadState *thr) {
     cmp = kActive;
     // Racy
     //pri_[thr->tid] = kMaxPri;
-    ProcessPendingSignals(thr);  // Dangerous, must change.
+    //ProcessPendingSignals(thr);  // Dangerous, must change.
     proc_yield(20);
   }
 }
@@ -218,9 +237,9 @@ void Scheduler::Tick(ThreadState *thr) {
     return;
   }
   { // DEBUG
-    //Printf("%d - %d - c:%llu -", thr->tid, tick_, s_rng_count);
-    //PrintUserSanitizerStackBoundary();
-    //Printf("\n");
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
     //if (tick_ == 25) {
     //  Printf("Here\n");
     //}
@@ -485,6 +504,8 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
   s[1] = rdtsc();
   DemoPlayInitialise();
   CloseFile(demo_record_.record_fd_);
+  CloseFile(demo_record_.signal_fd_);
+  CloseFile(demo_record_.syscall_fd_);
   DemoRecordInitialise();
 }
 
@@ -598,17 +619,34 @@ bool Scheduler::SyscallIsInputFd(const char *addr, uptr addrlen) {
   return false;
 }
 
+void Scheduler::SyscallAccept(int *ret, int sockfd, void *addr, unsigned *addrlen, unsigned addrlen_pre) {
+  // TODO still need IsInputFd check.
+  int errno_ = *__errno_location();
+  int replay_ret = *ret;
+  void *params[4] = {&replay_ret, &errno_, addr, addrlen};
+  uptr param_size[4] = {sizeof(int), sizeof(int), addrlen_pre, sizeof(unsigned)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("accept", 4, params, param_size);
+  if (replay_ret > 0) {
+    if (*ret <= 0) {
+      *ret = dup(sockfd);
+    }
+    fd_map_[replay_ret] = *ret;
+    input_fd_[*ret] = true;
+  }
+  DemoRecordSyscallNext("accept", 4, params, param_size);
+  *__errno_location() = errno_;
+}
+
 void Scheduler::SyscallBind(int *ret, int fd, void *addr, uptr addrlen) {
   // TODO still need IsInputFd check.
   CHECK(fd < kMaxFd && "Bind fd too large.");
   input_fd_[fd] = true;
-  int real_ret = *ret;
   int replay_fd = fd;
   void *params[2] = {ret, &replay_fd};
   uptr param_size[2] = {sizeof(int), sizeof(int)};
   ScopedScheduler scoped(this, cur_thread());
   DemoPlaySyscallNext("bind", 2, params, param_size);
-  CHECK(real_ret == *ret);
   fd_map_[replay_fd] = fd;
   DemoRecordSyscallNext("bind", 2, params, param_size);
 }
@@ -618,7 +656,6 @@ void Scheduler::SyscallClock_gettime(int *ret, void *tp) {
   void *params[3] = {ret, tp, &errno_};
   uptr param_size[3] = {sizeof(int), struct_timespec_sz, sizeof(int)};
   ScopedScheduler scoped(this, cur_thread());
-CHECK(active_tid_ == cur_thread()->tid);
   DemoPlaySyscallNext("clock_gettime", 3, params, param_size);
   DemoRecordSyscallNext("clock_gettime", 3, params, param_size);
   *__errno_location() = errno_;
@@ -647,6 +684,23 @@ void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {
   CHECK(real_ret == *ret);
   fd_map_[replay_fd] = sockfd;
   DemoRecordSyscallNext("connect", 2, params, param_size);
+}
+
+// TODO For now, always rec/rep epfd and all event fds.
+void Scheduler::SyscallEpoll_wait(int *ret, int epfd, void *events, int maxevents, int timeout) {
+  /*int errno_ = *__errno_location();
+  struct epoll_event *epoll_events = (struct epoll_event *)events;
+  CHECK(maxevents <= 64 && "Error: too many events in epoll_wait");
+  void *params[66] = {ret, &errno_};
+  uptr param_size[66] = {sizeof(int), sizeof(int)};
+  for (uptr p = 0; p < (uptr)maxevents; ++p) {
+    params[p + 2] = &epoll_events[p];
+    param_size[p + 2] = sizeof(struct epoll_event);
+  }
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("epoll_wait", maxevents + 2, params, param_size);
+  DemoRecordSyscallNext("epoll_wait", maxevents + 2, params, param_size);
+  *__errno_location() = errno_;*/
 }
 
 void Scheduler::SyscallGettimeofday(int *ret, void *tv, void *tz) {
@@ -859,6 +913,21 @@ void Scheduler::SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags) {
   *__errno_location() = errno_;
 }
 
+void Scheduler::SyscallSendto(
+    sptr *ret, int sockfd, void *buf, uptr len, int flags,
+    void *dest_addr, int addrlen) {
+  int errno_ = *__errno_location();
+  if (!input_fd_[sockfd]) {
+    return;
+  }
+  void *params[2] = {ret, &errno_};
+  uptr param_size[2] = {sizeof(sptr), sizeof(int)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("sendto", 2, params, param_size);
+  DemoRecordSyscallNext("sendto", 2, params, param_size);
+  *__errno_location() = errno_;
+}
+
 void Scheduler::SyscallSelect(
     int *ret, int nfds, void *readfds, void *writefds, void *exceptfds,
     void *timeout, void *select) {
@@ -879,6 +948,7 @@ void Scheduler::SyscallSelect(
     }
   }
   CHECK(!(has_input && has_noninput) && "Input and non-input in select()");
+
   // Actual syscall.
   typedef int (*select_t)(int, void *, void *, void *, void *);
   select_t select_ = (select_t)select;
@@ -887,6 +957,7 @@ void Scheduler::SyscallSelect(
     return;
   }
   int errno_ = *__errno_location();
+
   // Set dummy fd sets to replay into.
   __sanitizer___kernel_fd_set readfds_, writefds_, exceptfds_;
   void *fd_sets_[3] = {&readfds_, &writefds_, &exceptfds_};
@@ -899,8 +970,10 @@ void Scheduler::SyscallSelect(
       internal_memcpy(fd_set_, fd_set, kMaxFd / 8);
     }
   }
+
   // Manually set critical section and record/replay.
-  void *params[5] = {ret, &errno_, &readfds_, &writefds_, &exceptfds_};
+  void *params[5] = {ret, &errno_,
+      readfds_.fds_bits, writefds_.fds_bits, exceptfds_.fds_bits};
   uptr param_size[5] =
       {sizeof(int), sizeof(int), kMaxFd / 8, kMaxFd / 8, kMaxFd / 8};
   {
@@ -909,6 +982,7 @@ void Scheduler::SyscallSelect(
     DemoRecordSyscallNext("select", 5, params, param_size);
     *__errno_location() = errno_;
   }
+
   // Using the fd_map, set the fds for the actual fd_sets.
   //void *fd_sets_[3] = {&readfds_, &writefds_, &exceptfds_};
   for (int set = 0; set < 3; ++set) {
@@ -924,6 +998,19 @@ void Scheduler::SyscallSelect(
       }
     }
   }
+}
+
+void Scheduler::SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt) {
+  int errno_ = *__errno_location();
+  if (!input_fd_[fd]) {
+    return;
+  }
+  void *params[2] = {ret, &errno_};
+  uptr param_size[2] = {sizeof(sptr), sizeof(int)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("writev", 2, params, param_size);
+  DemoRecordSyscallNext("writev", 2, params, param_size);
+  *__errno_location() = errno_;
 }
 
 void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
@@ -957,7 +1044,6 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
 u64 Scheduler::RandomNumber() {
   // Reading from file only supports s64, not u64. So the MSB must be 0.
 //CHECK(ctx->scheduler.exclude_point_[cur_thread()->tid] != 1);
-++s_rng_count;
   return xorshift128plus() >> 1;
 }
 
@@ -994,9 +1080,9 @@ void Scheduler::AnnotateExcludeEnter() {
   // thread will share the same tick as this, and if that op is in the replay
   // file it will be scheduled over this.
   {  // DEBUG
-    Printf("%d - %d - EXCLUSION - ", thr->tid, tick_);
-    PrintUserSanitizerStackBoundary();
-    Printf("\n");
+//    Printf("%d - %d - EXCLUSION - ", thr->tid, tick_);
+//    PrintUserSanitizerStackBoundary();
+//    Printf("\n");
   }
   SignalPending(thr);
   ++tick_;
@@ -1013,6 +1099,13 @@ void Scheduler::AnnotateExcludeExit() {
 
 void Scheduler::AEx() { ctx->scheduler.AnnotateExcludeEnter(); }
 void Scheduler::ARe() { ctx->scheduler.AnnotateExcludeExit(); }
+
+bool Scheduler::IsDemoPlayback() {
+  mtx.Lock();
+  bool ret = DemoPlayActive();
+  mtx.Unlock();
+  return ret;
+}
 
 
 ////////////////////////////////////////
@@ -1080,15 +1173,21 @@ void Scheduler::DemoPlayInitialise() {
   s[1] = internal_simple_strtoll(
       demo_play_.demo_contents_, &demo_play_.demo_contents_, 10);
   DemoPlayNext();
+  // For backward compatability, pid 0 is empty string.
+  char pid_buf[5];
+  internal_snprintf(pid_buf, 5, "%d", pid_);
+  if (pid_ == 0) {
+    pid_buf[0] = '\0';
+  }
   // SIGNAL setup
-  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->play_demo);
+  internal_snprintf(buf, 128, "%s/SIGNAL%s", flags()->play_demo, pid_buf);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.signal_contents_, &buffer_size, &contents_size));
   for (int tid = 0; tid < kNumThreads; ++tid) {
     DemoPlaySignalNext(tid);
   }
   // SYSCALL setup
-  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->play_demo);
+  internal_snprintf(buf, 128, "%s/SYSCALL%s", flags()->play_demo, pid_buf);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.syscall_contents_, &buffer_size, &contents_size));
 }
@@ -1158,7 +1257,8 @@ void Scheduler::DemoPlaySyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
   if (!DemoPlayEnabled() ||
       (exclude_point_[cur_thread()->tid] != 0 &&
-          internal_strncmp(func, "connect", 7) != 0)) {// &&
+          internal_strncmp(func, "connect", 7) != 0 &&
+          internal_strncmp(func, "bind", 4) != 0)) {// &&
           //internal_strncmp(func, "clock", 5) != 0)) {
     return;
   }
@@ -1230,8 +1330,14 @@ void Scheduler::DemoRecordInitialise() {
   WriteToFile(demo_record_.record_fd_, buf, internal_strlen(buf));
   demo_record_.demo_tick_ = -1;
   demo_record_.event_type_ = END;
+  // For backward compatability, pid 0 is empty string.
+  char pid_buf[5];
+  internal_snprintf(pid_buf, 5, "%d", pid_);
+  if (pid_ == 0) {
+    pid_buf[0] = '\0';
+  }
   // SIGNAL setup
-  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->record_demo);
+  internal_snprintf(buf, 128, "%s/SIGNAL%s", flags()->record_demo, pid_buf);
   demo_record_.signal_fd_ = OpenFile(buf, WrOnly);
   for (int tid = 0; tid < kNumThreads; ++tid) {
     demo_record_.signal_file_pos_[tid] =
@@ -1242,7 +1348,7 @@ void Scheduler::DemoRecordInitialise() {
     WriteToFile(demo_record_.signal_fd_, buf, internal_strlen(buf));
   }
   // SYSCALL setup
-  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->record_demo);
+  internal_snprintf(buf, 128, "%s/SYSCALL%s", flags()->record_demo, pid_buf);
   demo_record_.syscall_fd_ = OpenFile(buf, WrOnly);
 }
 
@@ -1341,7 +1447,8 @@ void Scheduler::DemoRecordSyscallNext(
     const char *func, uptr param_count, void *param[], uptr param_size[]) {
   if (!DemoRecordEnabled() ||
       (exclude_point_[cur_thread()->tid] != 0 &&
-          internal_strncmp(func, "connect", 7) != 0)) {// &&
+          internal_strncmp(func, "connect", 7) != 0 &&
+          internal_strncmp(func, "bind", 4) != 0)) {// &&
           //internal_strncmp(func, "clock", 5) != 0)) {
     return;
   }

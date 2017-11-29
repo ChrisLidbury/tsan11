@@ -927,6 +927,7 @@ INTERCEPTOR_WITH_SUFFIX(SSIZE_T, writev, int fd, __sanitizer_iovec *iov,
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
   if (fd >= 0) COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd);
   SSIZE_T res = REAL(writev)(fd, iov, iovcnt);
+  __tsan::ctx->scheduler.SyscallWritev(&res, fd, iov, iovcnt);
   if (res > 0) read_iovec(ctx, iov, iovcnt, res);
   return res;
 }
@@ -2474,7 +2475,11 @@ INTERCEPTOR(int, accept, int fd, void *addr, unsigned *addrlen) {FCHECK(false&&"
     COMMON_INTERCEPTOR_READ_RANGE(ctx, addrlen, sizeof(*addrlen));
     addrlen0 = *addrlen;
   }
-  int fd2 = REAL(accept)(fd, addr, addrlen);
+  int fd2 = 0;
+  if (!__tsan::ctx->scheduler.IsDemoPlayback()) {
+    fd2 = REAL(accept)(fd, addr, addrlen);
+  }
+  __tsan::ctx->scheduler.SyscallAccept(&fd2, fd, addr, addrlen, addrlen0);
   if (fd2 >= 0) {
     if (fd >= 0) COMMON_INTERCEPTOR_FD_SOCKET_ACCEPT(ctx, fd, fd2);
     if (addr && addrlen)
@@ -2499,7 +2504,11 @@ INTERCEPTOR(int, accept4, int fd, void *addr, unsigned *addrlen, int f) {FCHECK(
   // FIXME: under ASan the call below may write to freed memory and corrupt
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
-  int fd2 = REAL(accept4)(fd, addr, addrlen, f);
+  int fd2 = 0;
+  if (!__tsan::ctx->scheduler.IsDemoPlayback()) {
+    fd2 = REAL(accept4)(fd, addr, addrlen, f);
+  }
+  __tsan::ctx->scheduler.SyscallAccept(&fd2, fd, addr, addrlen, addrlen0);
   if (fd2 >= 0) {
     if (fd >= 0) COMMON_INTERCEPTOR_FD_SOCKET_ACCEPT(ctx, fd, fd2);
     if (addr && addrlen)
@@ -5841,6 +5850,8 @@ INTERCEPTOR(SSIZE_T, sendto, int fd, void *buf, SIZE_T len, int flags,
   }
   // Can't check dstaddr as it may have uninitialized padding at the end.
   SSIZE_T res = REAL(sendto)(fd, buf, len, flags, dstaddr, addrlen);
+  __tsan::ctx->scheduler.SyscallSendto(&res, fd, buf, len, flags,
+                                         dstaddr, addrlen);
   if (common_flags()->intercept_send && res > 0)
     COMMON_INTERCEPTOR_READ_RANGE(ctx, buf, Min((SIZE_T)res, len));
   return res;

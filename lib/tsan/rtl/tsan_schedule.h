@@ -133,11 +133,13 @@ class Scheduler {
   // up with when it was recorded.
   bool SyscallIsInputFd(const char *addr, uptr addrlen);
 
+  void SyscallAccept(int *ret, int sockfd, void *addr, unsigned *addrlen, unsigned addrlen_pre);
   void SyscallBind(int *ret, int fd, void *addr, uptr addrlen);
   void SyscallClock_gettime(int *ret, void *tp);
   void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen);
-  void SyscallGettimeofday(int *ret, void *tv, void *tz);
-  void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);
+  void SyscallEpoll_wait(int *ret, int epfd, void *events, int maxevents, int timeout);  // Inactive
+  void SyscallGettimeofday(int *ret, void *tv, void *tz);  // Inactive
+  void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);  // Inactive
   void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout);
   void SyscallRead(sptr *ret, int fd, void *buf, uptr count);
   void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags);
@@ -145,7 +147,10 @@ class Scheduler {
                        void *src_addr, int *addrlen, uptr addrlen_pre);
   void SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, void *recvmsg);
   void SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags);
+  void SyscallSendto(sptr *ret, int sockfd, void *buf, uptr len, int flags,
+                     void *dest_addr, int addrlen);
   void SyscallSelect(int *ret, int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, void *select);
+  void SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt);
 
   // File stuff uuuggghhhghghghhhhh.
   // For demo playback, each process has its own file system to replay from.
@@ -193,6 +198,9 @@ class Scheduler {
   void AnnotateExcludeExit();
   static void AEx();
   static void ARe();
+
+  // For system calls. Check if this is demo playback to avoid blocking.
+  bool IsDemoPlayback();
 
 
   // For ease of functions that use the mutex and Wait().
