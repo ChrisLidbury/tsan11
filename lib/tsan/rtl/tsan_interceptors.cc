@@ -690,7 +690,7 @@ TSAN_INTERCEPTOR(int, _IO_getc, void *stream) {
   int fd = 0;
   void *buf = &res;
   uptr count = sizeof(int);
-  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count, nullptr);
   return res;
 }
 
@@ -701,7 +701,7 @@ TSAN_INTERCEPTOR(int, fgetc, void *stream) {
   int fd = 0;
   void *buf = &res;
   uptr count = sizeof(int);
-  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count, nullptr);
   return res;
 }
 
@@ -719,7 +719,7 @@ TSAN_INTERCEPTOR(char *, fgets, char *str, int num, void *stream) {
   int fd = fileno_unlocked(stream);
   void *buf = str;
   uptr count = num;
-  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count, nullptr);
   res = ret == 0 ? nullptr : str;
   return res;
 }
@@ -732,7 +732,7 @@ TSAN_INTERCEPTOR(uptr, fread, void *ptr, uptr size, uptr count, void *stream) {
   int fd = fileno_unlocked(stream);
   void *buf = ptr;
   uptr count_ = size * count;
-  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count_);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count_, nullptr);
   return ret;
 }
 
@@ -744,7 +744,7 @@ TSAN_INTERCEPTOR(int, getchar) {
   int fd = 0;
   void *buf = &res;
   uptr count = sizeof(int);
-  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count);
+  __tsan::ctx->scheduler.SyscallRead(&ret, fd, buf, count, nullptr);
   return res;
 }
 
@@ -1699,7 +1699,9 @@ TSAN_INTERCEPTOR(int, close, int fd) {FCHECK(false&&"close");
   SCOPED_TSAN_INTERCEPTOR(close, fd);
   if (fd >= 0)
     FdClose(thr, pc, fd);
-  return REAL(close)(fd);
+  int ret = REAL(close)(fd);
+  __tsan::ctx->scheduler.SyscallClose(&ret, fd);
+  return ret;
 }
 
 #if SANITIZER_LINUX
@@ -1734,6 +1736,7 @@ TSAN_INTERCEPTOR(void, __res_iclose, void *state, bool free_addr) {FCHECK(false&
 TSAN_INTERCEPTOR(int, pipe, int *pipefd) {FCHECK(false&&"pipe");
   SCOPED_TSAN_INTERCEPTOR(pipe, pipefd);
   int res = REAL(pipe)(pipefd);
+  __tsan::ctx->scheduler.SyscallPipe(&res, pipefd);
   if (res == 0 && pipefd[0] >= 0 && pipefd[1] >= 0)
     FdPipeCreate(thr, pc, pipefd[0], pipefd[1]);
   return res;
@@ -1743,6 +1746,7 @@ TSAN_INTERCEPTOR(int, pipe, int *pipefd) {FCHECK(false&&"pipe");
 TSAN_INTERCEPTOR(int, pipe2, int *pipefd, int flags) {FCHECK(false&&"pipe2");
   SCOPED_TSAN_INTERCEPTOR(pipe2, pipefd, flags);
   int res = REAL(pipe2)(pipefd, flags);
+  __tsan::ctx->scheduler.SyscallPipe(&res, pipefd);
   if (res == 0 && pipefd[0] >= 0 && pipefd[1] >= 0)
     FdPipeCreate(thr, pc, pipefd[0], pipefd[1]);
   return res;

@@ -21,6 +21,9 @@ append_list_if(SANITIZER_LIMIT_FRAME_SIZE -Wframe-larger-than=530
                TSAN_RTL_CFLAGS)
 append_list_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors
                TSAN_RTL_CFLAGS)
+#TODO
+#list(APPEND TSAN_RTL_CFLAGS -pg)
+#list(REMOVE_ITEM TSAN_RTL_CFLAGS -fomit-frame-pointer)
 
 set(TSAN_SOURCES
   rtl/tsan_clock.cc

@@ -15,12 +15,8 @@
 // For syscall record/replay.
 extern "C" int *__errno_location();
 
-// For syscall replay, used to prime stdin.
-// I don't think forward declaring std functions is allowed.
-//int putchar(int character);
-
 // For signal replay.
-namespace __tsan{
+namespace __tsan {
 void rtl_internal_sighandler(int sig);
 void ProcessPendingSignals(ThreadState *thr);
 }  // namespace __tsan
@@ -33,31 +29,8 @@ void ProcessPendingSignals(ThreadState *thr);
 #define FD_ISSET(fd, fds) ((((u64 *)FD_BITS(fds))[fd / 64] & ((u64)1 << (fd % 64))) != 0)
 
 // CMSG info
-/*#define CMSG_FIRSTHDR(msghdr) \
-    ((size_t) (msghdr)->msg_controllen >= sizeof (struct __sanitizer_cmsghdr) \
-    ? (struct __sanitizer_cmsghdr *) (mhdr)->msg_control \
-    : (struct __sanitizer_cmsghdr *) 0)
-#define CMSG_NXTHDR(msghdr, cmsg)
-#define CMSG_DATA(cmsg) ((void *) (&cmsg->cmsg_type + sizeof(int)))*/
 #define SOL_SOCKET 0x01
 #define SCM_RIGHTS 1
-
-/*namespace __tsan {
-// For epoll_wait.
-typedef union epoll_data
-{
-  void *ptr;
-  int fd;
-  u32 u32_;
-  u64 u64_;
-} epoll_data_t;
-
-struct epoll_event
-{
-  u32 events;
-  epoll_data_t data;
-};
-}*/  // namespace __tsan
 
 // For accept.
 extern "C" int dup(int fd);
@@ -139,7 +112,7 @@ struct ScopedScheduler {
 // Start of Scheduler stuff.
 Scheduler::Scheduler()
     : tick_(0), mtx(MutexTypeSchedule, StatMtxTotal), last_free_idx_(0),
-      reschedule_tick_(0), pid_(0) {
+      reschedule_tick_(0), pid_(0) {count  =0;
   internal_memset(cond_vars_, kInactive, sizeof(cond_vars_));
   internal_memset(thread_status_, FINISHED, sizeof(thread_status_));
   internal_memset(wait_tid_, -1, sizeof(wait_tid_));
@@ -147,11 +120,15 @@ Scheduler::Scheduler()
   internal_memset(thread_mtx_, 0, sizeof(thread_mtx_));
   internal_memset(exclude_point_, 0, sizeof(exclude_point_));
   internal_memset(input_fd_, 0, sizeof(input_fd_));
+  internal_memset(pipe_fd_, 0, sizeof(pipe_fd_));
 }
 
 Scheduler::~Scheduler() {
   DemoRecordFinalise();
 }
+
+// For queue scheduling.
+#include "tsan_schedule_queue.inc"
 
 // Assume this is the only scheduler.
 void Scheduler::Initialise() {
@@ -161,6 +138,9 @@ void Scheduler::Initialise() {
   // Assumes ownership of PRNG buffer. Can make a member if multiple schedulers.
   s[0] = rdtsc();
   s[1] = rdtsc();
+
+// For queue scheduling.
+WaitQueue::WaitQueueInit();
 
   // Set up demo playback.
   DemoPlayInitialise();
@@ -205,7 +185,7 @@ void Scheduler::Initialise() {
 // Core ordering functions.
 ////////////////////////////////////////
 
-void Scheduler::Wait(ThreadState *thr) {
+/*void Scheduler::Wait(ThreadState *thr) {
   uptr cmp = kActive;
   while (!atomic_compare_exchange_strong(
       &cond_vars_[thr->tid], &cmp, kCritical, memory_order_relaxed)) {
@@ -228,25 +208,16 @@ void Scheduler::Tick(ThreadState *thr) {
   // If annotated out, immedaitely reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-//if (tick_ > 10) {
-//Printf("%d - %d - c:%llu -", thr->tid, tick_, s_rng_count);
-//PrintUserSanitizerStackBoundary();
-//Printf("\n");
-//}
     mtx.Unlock();
     return;
   }
-  { // DEBUG
+  {  // DEBUG
     Printf("%d - %d - ", thr->tid, tick_);
     PrintUserSanitizerStackBoundary();
     Printf("\n");
-    //if (tick_ == 25) {
-    //  Printf("Here\n");
-    //}
   }
 
   if (pri_[thr->tid] > kMaxPri) {
-    //--pri_[thr->tid];
     pri_[thr->tid] = kMaxPri;
   }
   // Check for signals if replay.
@@ -261,8 +232,6 @@ void Scheduler::Tick(ThreadState *thr) {
         ++pri_[skip_tid];
       }
     }
-    //RandomNumber();
-    //next_tid = demo_play_.event_param_;
     next_tid = Schedule(RandomNumber());
     CHECK((u64)next_tid == demo_play_.event_param_);
   } else {
@@ -305,7 +274,7 @@ void Scheduler::Reschedule() {
   active_tid_ = next_tid;
   DemoRecordOverride(tick_ - 1, SCHEDULE, next_tid, 1);
   mtx.Unlock();
-}
+}*/
 
 int Scheduler::Schedule(u64 rnd) {
   if (last_free_idx_ == 0) {
@@ -347,8 +316,6 @@ int Scheduler::Schedule(u64 rnd) {
 void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   ScopedScheduler scoped(this, thr);
   Enable(tid);
-  //if (exclude_point_[thr->tid] == 1) {exclude_point_[tid] = 0;}
-  //if (exclude_point_[thr->tid] == 1) {CHECK(false && "Create thread in exclusion.");}
   if (thr->tid != tid) {
     atomic_store(&cond_vars_[tid], kInactive, memory_order_relaxed);
   }
@@ -357,7 +324,6 @@ void Scheduler::ThreadNew(ThreadState *thr, int tid) {
 void Scheduler::ThreadDelete(ThreadState *thr) {
   ScopedScheduler scoped(this, thr);
   Disable(thr->tid);
-  //if (exclude_point_[thr->tid] == 1) {exclude_point_[thr->tid] = 0;}
   thread_status_[thr->tid] = FINISHED;
   int ptid = thr->tctx->parent_tid;
   // Wakes up parent thread if it is waiting for this thread to finish.
@@ -513,7 +479,7 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
 // Signal handling.
 ////////////////////////////////////////
 
-bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
+bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {CHECK(false);
   mtx.Lock();
   if (DemoPlayActive() &&
       (demo_play_.signal_tick_[thr->tid] > tick_ ||
@@ -526,6 +492,7 @@ bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
     mtx.Unlock();
     return false;
   }
+  // Prevent this function from being reentrant during replay.
   demo_play_.signal_num_[thr->tid] = -1;
   // If the thread is blocked then wakeup. This is for non-replay, the replay
   // counterpart is the SIG_WAKEUP handling in SignalPending().
@@ -661,6 +628,20 @@ void Scheduler::SyscallClock_gettime(int *ret, void *tp) {
   *__errno_location() = errno_;
 }
 
+void Scheduler::SyscallClose(int *ret, int fd) {  // TODO is the non-ordered case deterministic?
+  bool ordered = input_fd_[fd] || pipe_fd_[fd];
+  if (ordered) {
+    Wait(cur_thread());
+  }
+  mtx.Lock();
+  input_fd_[fd] = 0;
+  pipe_fd_[fd] = 0;
+  mtx.Unlock();
+  if (ordered) {
+    Tick(cur_thread());
+  }
+}
+
 void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {
   //Printf("Intercepting: connect %d -> %s\n", sockfd, (const char *)(addr) + 2);
   const char *path = (const char *)(addr) + sizeof(short);
@@ -721,6 +702,26 @@ void Scheduler::SyscallIoctl(
   //DemoRecordSyscallNext("ioctl", 2, params, param_size);
 }
 
+void Scheduler::SyscallPipe(int *ret, int pipefd[2]) {
+  Printf("Intercepting: pipe [%d, %d]\n", pipefd[0], pipefd[1]);
+  pipe_fd_[pipefd[0]] = true;
+  pipe_fd_[pipefd[1]] = true;
+  int real_ret = *ret;
+  int replay_fd[2];
+  replay_fd[0] = pipefd[0];
+  replay_fd[1] = pipefd[1];
+  int errno_ = *__errno_location();
+  void *params[3] = {ret, replay_fd, &errno_};
+  uptr param_size[3] = {sizeof(int), 2 * sizeof(int), sizeof(int)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("pipe", 3, params, param_size);
+  CHECK(real_ret == *ret);
+  fd_map_[replay_fd[0]] = pipefd[0];
+  fd_map_[replay_fd[1]] = pipefd[1];
+  DemoRecordSyscallNext("pipe", 3, params, param_size);
+  *__errno_location() = errno_;
+}
+
 void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout) {
   int errno_ = *__errno_location();
   __sanitizer_pollfd *poll_fds = (__sanitizer_pollfd *)fds;
@@ -730,8 +731,8 @@ void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout) {
   void *params[26] = {ret};
   uptr param_size[26] = {sizeof(int)};
   for (uptr p = 0; p < nfds; ++p) {
-    if (/*!*/input_fd_[poll_fds[p].fd]) {
-      ++icount;//continue;
+    if (input_fd_[poll_fds[p].fd] || pipe_fd_[poll_fds[p].fd]) {
+      ++icount;/*continue;*/
     }
     params[2 * p/*icount*/ + 1] = &poll_fds[p].events;
     param_size[2 * p/*icount*/ + 1] = sizeof(poll_fds[p].events);
@@ -748,22 +749,40 @@ void Scheduler::SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout) {
   // TODO If there is a mix on input fds and non-input fds.
   // Record another var that indicated if non-input fds unblocked thread.
   CHECK(icount == nfds);
+  // For now mark them as input
+  // for (int idx = 0; idx < nfds; ++idx) {input_fd_[poll_fds[idx].fd]=true;}
   ScopedScheduler scoped(this, cur_thread());
-//temp
-//if (icount != nfds) {
-//for (int p = 0; p < nfds; ++p)
-//input_fd_[poll_fds[p].fd] = true;
-//}
-  DemoPlaySyscallNext("poll", 2 * nfds + 2, params, param_size);
-  DemoRecordSyscallNext("poll", 2 * nfds + 2, params, param_size);
+  {  // DEBUG
+    //if (icount != nfds) {
+      //for (int p = 0; p < nfds; ++p)
+      //input_fd_[poll_fds[p].fd] = true;
+    //}
+  }
+  DemoPlaySyscallNext("poll", 2 * /*nfds*/icount + 2, params, param_size);
+  DemoRecordSyscallNext("poll", 2 * /*nfds*/icount + 2, params, param_size);
   *__errno_location() = errno_;
 }
 
-void Scheduler::SyscallRead(sptr *ret, int fd, void *buf, uptr count) {
-  int errno_ = *__errno_location();
-  if (!input_fd_[fd]) {
+void Scheduler::SyscallRead(sptr *ret, int fd, void *buf, uptr count, void *read) {
+  // Gross hack, other stream ops use this func.
+  typedef sptr (*read_t)(int, void *, uptr);
+  read_t read_ = read != nullptr ? (read_t)read : nullptr;
+  // Fast path for normal non-input reads.
+  if (!input_fd_[fd] && !pipe_fd_[fd]) {
+    *ret = read != nullptr ? read_(fd, buf, count) : *ret;
     return;
   }
+  CHECK(!(input_fd_[fd] && pipe_fd_[fd]) && "input and pipe fd");
+  // Pipe fds are ordered but not recorded.
+  if (pipe_fd_[fd]) {
+    CHECK(read != nullptr);
+    ScopedScheduler scoped(this, cur_thread());
+    *ret = read_(fd, buf, count);
+    return;
+  }
+  // Input fd is recorded as usual.
+  *ret = read != nullptr ? read_(fd, buf, count) : *ret;
+  int errno_ = *__errno_location();
   void *params[3] = {ret, buf, &errno_};
   uptr param_size[3] = {sizeof(sptr), count, sizeof(int)};
   ScopedScheduler scoped(this, cur_thread());
@@ -805,7 +824,7 @@ void Scheduler::SyscallRecvfrom(
 static bool ReadCmsgHdr(void *msghdr, int *scm_fds, int *scm_fds_count) {
   const unsigned kCmsgDataOffset =
       RoundUpTo(sizeof(__sanitizer_cmsghdr), sizeof(uptr));
-  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;
+  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;    if (msg->msg_controllen == 56) msg->msg_controllen = 32;
   char *p = (char *)((__sanitizer_msghdr *)msg)->msg_control;
   char *const control_end = p + msg->msg_controllen;
   bool has_ancilliary = false;
@@ -881,6 +900,7 @@ void Scheduler::SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, v
   // If the original run returned ancilliary data, then so must the replay.
   CHECK(!(has_ancilliary && !has_ancilliary_replay) && "Unexpected ancilliary.");
   if (has_ancilliary_replay) {
+    // TODO don't retry spoof the fd instead.
     int retry_attempt = 0;
     for (; *ret < 0 && retry_attempt < 10; ++retry_attempt) {
       *ret = recvmsg_(sockfd, msghdr, flags);
@@ -1000,7 +1020,33 @@ void Scheduler::SyscallSelect(
   }
 }
 
-void Scheduler::SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt) {
+void Scheduler::SyscallWrite(sptr *ret, int fd, void *buf, uptr count, void *write) {
+  typedef sptr (*write_t)(int, void *, uptr);
+  write_t write_ = (write_t)write;
+  // Fast path for normal non-input reads.
+  if (!input_fd_[fd] && !pipe_fd_[fd]) {
+    *ret = write_(fd, buf, count);
+    return;
+  }
+  CHECK(!(input_fd_[fd] && pipe_fd_[fd]) && "input and pipe fd");
+  // Pipe fds are ordered but not recorded.
+  if (pipe_fd_[fd]) {
+    ScopedScheduler scoped(this, cur_thread());
+    *ret = write_(fd, buf, count);
+    return;
+  }
+  // Input fd is recorded as usual.
+  *ret = write_(fd, buf, count);
+  int errno_ = *__errno_location();
+  void *params[2] = {ret, &errno_};
+  uptr param_size[2] = {sizeof(sptr), sizeof(int)};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("write", 2, params, param_size);
+  DemoRecordSyscallNext("write", 2, params, param_size);
+  *__errno_location() = errno_;
+}
+
+void Scheduler::SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt) {//TODO
   int errno_ = *__errno_location();
   if (!input_fd_[fd]) {
     return;
@@ -1044,6 +1090,7 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
 u64 Scheduler::RandomNumber() {
   // Reading from file only supports s64, not u64. So the MSB must be 0.
 //CHECK(ctx->scheduler.exclude_point_[cur_thread()->tid] != 1);
+++__tsan::ctx->scheduler.count;
   return xorshift128plus() >> 1;
 }
 
@@ -1112,13 +1159,11 @@ bool Scheduler::IsDemoPlayback() {
 // Other internal utilities.
 ////////////////////////////////////////
 
-void Scheduler::Enable(int tid) {
+/*void Scheduler::Enable(int tid) {
   cond_vars_idx_[last_free_idx_] = tid;
   cond_vars_idx_inv_[tid] = last_free_idx_++;
   thread_status_[tid] = RUNNING;
   pri_[tid] = kMaxPri;
-//if(exclude_point_[cur_thread()->tid]==1){exclude_point_[tid]=1;}
-//if (exclude_point_[cur_thread()->tid] == 1) {CHECK(false && "Enable thread in exclusion.");}
 }
 
 void Scheduler::Disable(int tid) {
@@ -1126,7 +1171,7 @@ void Scheduler::Disable(int tid) {
   cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
   cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
   thread_status_[tid] = DISABLED;
-}
+}*/
 
 void Scheduler::PrintUserSanitizerStackBoundary() {
   ThreadState *thr = cur_thread();
@@ -1490,3 +1535,11 @@ void Scheduler::DemoRecordSyscallNext(
 }
 
 }  // namespace __tsan
+
+extern "C" void __tsan__Scheduler__AEx() {
+  __tsan::Scheduler::AEx();
+}
+
+extern "C" void __tsan__Scheduler__ARe() {
+  __tsan::Scheduler::ARe();
+}

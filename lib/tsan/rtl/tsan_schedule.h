@@ -136,12 +136,14 @@ class Scheduler {
   void SyscallAccept(int *ret, int sockfd, void *addr, unsigned *addrlen, unsigned addrlen_pre);
   void SyscallBind(int *ret, int fd, void *addr, uptr addrlen);
   void SyscallClock_gettime(int *ret, void *tp);
+  void SyscallClose(int *ret, int fd);
   void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen);
   void SyscallEpoll_wait(int *ret, int epfd, void *events, int maxevents, int timeout);  // Inactive
   void SyscallGettimeofday(int *ret, void *tv, void *tz);  // Inactive
   void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);  // Inactive
+  void SyscallPipe(int *ret, int pipefd[2]);
   void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout);
-  void SyscallRead(sptr *ret, int fd, void *buf, uptr count);
+  void SyscallRead(sptr *ret, int fd, void *buf, uptr count, void *read);
   void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags);
   void SyscallRecvfrom(sptr *ret, int sockfd, void *buf, uptr len, int flags,
                        void *src_addr, int *addrlen, uptr addrlen_pre);
@@ -150,6 +152,7 @@ class Scheduler {
   void SyscallSendto(sptr *ret, int sockfd, void *buf, uptr len, int flags,
                      void *dest_addr, int addrlen);
   void SyscallSelect(int *ret, int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, void *select);
+  void SyscallWrite(sptr *ret, int fd, void *buf, uptr count, void *write);
   void SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt);
 
   // File stuff uuuggghhhghghghhhhh.
@@ -316,7 +319,7 @@ class Scheduler {
   ////////////////////////////////////////
   // Scheduler state.
   ////////////////////////////////////////
-
+public: u64 count; private:
   // Represents a deterministic time point for the program.
   // This changes on each tick, and should not differ when replaying.
   u64 tick_;
@@ -368,7 +371,8 @@ private:
   // This is owned by both the record and replay state.
   static const int kMaxFd = 128;
   int input_fd_[kMaxFd];
-  int fd_map_[kMaxFd];  // demo replay fd to actual fd (for select).
+  int fd_map_[kMaxFd];   // demo replay fd to actual fd (for select).
+  int pipe_fd_[kMaxFd];  // Pipes are recorded in poll and ordered in read/write.
 
   // For excluding specific functions from the scheduler.
   int exclude_point_[kNumThreads];
@@ -379,5 +383,8 @@ private:
 };
 
 }  // namespace __tsan
+
+extern "C" void __tsan__Scheduler__ARe();
+extern "C" void __tsan__Scheduler__AEx();
 
 #endif  // TSAN_SCHEDULE_H_

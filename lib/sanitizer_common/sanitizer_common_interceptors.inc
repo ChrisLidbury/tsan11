@@ -777,8 +777,8 @@ INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"read
   // FIXME: under ASan the call below may write to freed memory and corrupt
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
-  SSIZE_T res = REAL(read)(fd, ptr, count);
-  __tsan::ctx->scheduler.SyscallRead(&res, fd, ptr, count);
+  SSIZE_T res;// = REAL(read)(fd, ptr, count);
+  __tsan::ctx->scheduler.SyscallRead(&res, fd, ptr, count, (void *)REAL(read));
   if (res > 0) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, res);
   if (res >= 0 && fd >= 0) COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
   return res;
@@ -878,7 +878,8 @@ INTERCEPTOR(SSIZE_T, write, int fd, void *ptr, SIZE_T count) {FCHECK(false&&"wri
   COMMON_INTERCEPTOR_ENTER(ctx, write, fd, ptr, count);
   COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
   if (fd >= 0) COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd);
-  SSIZE_T res = REAL(write)(fd, ptr, count);
+  SSIZE_T res;// = REAL(write)(fd, ptr, count);
+  __tsan::ctx->scheduler.SyscallWrite(&res, fd, ptr, count, (void *)REAL(write));
   // FIXME: this check should be _before_ the call to REAL(write), not after
   if (res > 0) COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, res);
   return res;
