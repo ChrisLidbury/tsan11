@@ -319,7 +319,7 @@ class Scheduler {
   ////////////////////////////////////////
   // Scheduler state.
   ////////////////////////////////////////
-public: u64 count; private:
+
   // Represents a deterministic time point for the program.
   // This changes on each tick, and should not differ when replaying.
   u64 tick_;
@@ -350,20 +350,47 @@ public: u64 count; private:
   // Check if this does not change between two calls to Reschedule().
   u64 reschedule_tick_;
   int active_tid_;
+  u64 stat_reschedule_;
 
   // Auxilliary info for the scheduling strategy.
   // Prioity based scheduling. Slightly adjust when repeatedly rescheduling.
   static const int kMaxPri = -300;
   static const int kMinPri = 3;
   int pri_[kNumThreads];
-public:
+
+  // For time slices.
+  static const int kSliceLength = 1;
+  int slice_;
+
+  // Prototype priority scheduling
+  int sys_pri_[kNumThreads];
+
   // Info for blocked threads.
   enum Status { FINISHED = 0, DISABLED = 1, CONDITIONAL = 2, RUNNING = 3 };
   Status thread_status_[kNumThreads];
   int wait_tid_[kNumThreads];                   // For thread join
   atomic_uintptr_t *thread_cond_[kNumThreads];  // For conditionals
   atomic_uintptr_t *thread_mtx_[kNumThreads];   // For mutex lock TODO merge with cond.
-private:
+
+  // Prototype fast tid selection for unlock.
+  /*int               lock_new_tid_[kNumThreads];  // Pair (tid, mtx) for new
+  atomic_uintptr_t *lock_new_mtx_[kNumThreads];  // threads being blocked.
+  uptr              lock_new_count_;             // How many waiting.
+
+  int lock_wait_lists_[kNumThreads][kNumThreads];  // Threads blocked.
+
+  int *lock_wait_free_list_[kNumThreads];  // Free wait lists.
+  int lock_wait_free_head_;                // List head.
+  int lock_wait_free_tail_;                // List tail.
+
+  atomic_uintptr_t *lock_active_mtx_[kNumThreads];   // Active wait lists mtx.
+  int *             lock_active_list_[kNumThreads];  // Active wait list for mtx.
+  uptr              lock_active_count_[kNumThreads]; // Active wait list length.
+  uptr              lock_active_list_count_;          // How many lists.*/
+
+  // Prototype queue unlock.
+  //u64 lock_queue_pos_[kNumThreads];  // Tick at which lock failed.
+
   // For signals, each thread has an epoch for determinism.
   u64 signal_tick_[kNumThreads];
 

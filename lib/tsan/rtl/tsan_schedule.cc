@@ -12,6 +12,8 @@
 
 //int tsanstart = 0;
 
+//#define USE_EXTERNAL_SCHED
+
 // For syscall record/replay.
 extern "C" int *__errno_location();
 
@@ -112,7 +114,7 @@ struct ScopedScheduler {
 // Start of Scheduler stuff.
 Scheduler::Scheduler()
     : tick_(0), mtx(MutexTypeSchedule, StatMtxTotal), last_free_idx_(0),
-      reschedule_tick_(0), pid_(0) {count  =0;
+      reschedule_tick_(0), /*lock test*/ /*lock_new_count_(0),lock_wait_free_head_(0),lock_wait_free_tail_(0),lock_active_list_count_(0)*/ /*lock test*//*,*/ pid_(0) {
   internal_memset(cond_vars_, kInactive, sizeof(cond_vars_));
   internal_memset(thread_status_, FINISHED, sizeof(thread_status_));
   internal_memset(wait_tid_, -1, sizeof(wait_tid_));
@@ -121,14 +123,18 @@ Scheduler::Scheduler()
   internal_memset(exclude_point_, 0, sizeof(exclude_point_));
   internal_memset(input_fd_, 0, sizeof(input_fd_));
   internal_memset(pipe_fd_, 0, sizeof(pipe_fd_));
+//for (int i = 0; i < kNumThreads; ++i) {lock_wait_free_list_[i] = lock_wait_lists_[i];}
 }
 
 Scheduler::~Scheduler() {
+  Printf("Reschedules: %llu\n", stat_reschedule_);
   DemoRecordFinalise();
 }
 
 // For queue scheduling.
+#ifdef USE_EXTERNAL_SCHED
 #include "tsan_schedule_queue.inc"
+#endif
 
 // Assume this is the only scheduler.
 void Scheduler::Initialise() {
@@ -138,9 +144,14 @@ void Scheduler::Initialise() {
   // Assumes ownership of PRNG buffer. Can make a member if multiple schedulers.
   s[0] = rdtsc();
   s[1] = rdtsc();
+  // Time slices
+  slice_ = kSliceLength;
+  stat_reschedule_ = 0;
 
-// For queue scheduling.
-WaitQueue::WaitQueueInit();
+  #ifdef USE_EXTERNAL_SCHED
+  // For queue scheduling.
+  WaitQueue::WaitQueueInit();
+  #endif
 
   // Set up demo playback.
   DemoPlayInitialise();
@@ -185,7 +196,8 @@ WaitQueue::WaitQueueInit();
 // Core ordering functions.
 ////////////////////////////////////////
 
-/*void Scheduler::Wait(ThreadState *thr) {
+#ifndef USE_EXTERNAL_SCHED
+void Scheduler::Wait(ThreadState *thr) {
   uptr cmp = kActive;
   while (!atomic_compare_exchange_strong(
       &cond_vars_[thr->tid], &cmp, kCritical, memory_order_relaxed)) {
@@ -211,11 +223,11 @@ void Scheduler::Tick(ThreadState *thr) {
     mtx.Unlock();
     return;
   }
-  {  // DEBUG
-    Printf("%d - %d - ", thr->tid, tick_);
-    PrintUserSanitizerStackBoundary();
-    Printf("\n");
-  }
+  //{  // DEBUG
+  //  Printf("%d - %d - ", thr->tid, tick_);
+  //  PrintUserSanitizerStackBoundary();
+  //  Printf("\n");
+  //}
 
   if (pri_[thr->tid] > kMaxPri) {
     pri_[thr->tid] = kMaxPri;
@@ -233,9 +245,17 @@ void Scheduler::Tick(ThreadState *thr) {
       }
     }
     next_tid = Schedule(RandomNumber());
+    slice_ = kSliceLength;
     CHECK((u64)next_tid == demo_play_.event_param_);
   } else {
-    next_tid = Schedule(rnd);
+    // Slice check
+    if (slice_ > 1 && thread_status_[thr->tid] == RUNNING) {
+      next_tid = thr->tid;
+      --slice_;
+    } else {
+      next_tid = Schedule(rnd);
+      slice_ = kSliceLength;
+    }
   }
   CHECK(thread_status_[next_tid] == RUNNING ||
       (next_tid == 0 && last_free_idx_ == 0));
@@ -269,12 +289,15 @@ void Scheduler::Reschedule() {
     ++pri_[tid];
   }
   int next_tid = Schedule(RandomNumber());
+  slice_ = kSliceLength;
+  ++stat_reschedule_;
   CHECK(thread_status_[next_tid] == RUNNING);
   atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
   active_tid_ = next_tid;
   DemoRecordOverride(tick_ - 1, SCHEDULE, next_tid, 1);
   mtx.Unlock();
-}*/
+}
+#endif
 
 int Scheduler::Schedule(u64 rnd) {
   if (last_free_idx_ == 0) {
@@ -397,8 +420,21 @@ void Scheduler::MutexLockFail(ThreadState *thr, void *m) {
   mtx.Lock();
   Disable(thr->tid);
   thread_mtx_[thr->tid] = (atomic_uintptr_t*)m;
+// Test
+//lock_queue_pos_[thr->tid] = atomic_load(&WaitQueue::queue_head, memory_order_relaxed);
+//
   mtx.Unlock();
 }
+
+/*void Scheduler::MutexLockFail(ThreadState *thr, void *m) {
+  mtx.Lock();
+  Disable(thr->tid);
+  thread_mtx_[thr->tid] = (atomic_uintptr_t*)m;
+  int idx = lock_new_count_++;
+  lock_new_mtx_[idx] = (atomic_uintptr_t*)m;
+  lock_new_tid_[idx] = thr->tid;
+  mtx.Unlock();
+}*/
 
 void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
   mtx.Lock();
@@ -420,6 +456,111 @@ void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
   thread_mtx_[tid_signal] = 0;
   mtx.Unlock();
 }
+
+//test
+/*void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
+  atomic_uintptr_t *lock_wait_mtx = (atomic_uintptr_t *)m;
+  int               list_idx = -1; // List of tids waiting.
+  int               scratch = -1;  // Avoid allocating list if only one thread to wake.
+  mtx.Lock();
+
+  // First see if there is an active list for this mtx.
+  for (uptr idx = 0; idx < lock_active_list_count_; ++idx) {
+    if (lock_wait_mtx == lock_active_mtx_[idx]) {
+      list_idx = idx;
+      break;
+    }
+  }
+
+  // Go through list of newly awaiting threads and adopt those waiting on m.
+  for (uptr idx = 0; idx < lock_new_count_; ++idx) {
+    if (lock_wait_mtx != lock_new_mtx_[idx]) {
+      continue;
+    }
+    // If there is no list then 'allocate' new one.
+    if (list_idx == -1 && scratch != -1) {
+      // Take next free list from the static pool.
+      int list_free_idx = lock_wait_free_head_;
+      lock_wait_free_head_ = (lock_wait_free_head_ + 1) % kNumThreads;
+      CHECK(lock_wait_free_head_ != lock_wait_free_tail_ && "list leak");
+      int *list = lock_wait_free_list_[list_free_idx];
+      // Place in list of active.
+      list_idx = lock_active_list_count_++;
+      lock_active_mtx_[list_idx] = lock_wait_mtx;
+      lock_active_list_[list_idx] = list;
+      lock_active_count_[list_idx] = 1;
+      list[0] = scratch;
+    }
+    scratch = lock_new_tid_[idx];
+    --lock_new_count_;
+    if (lock_new_count_ > idx) {
+      lock_new_mtx_[idx] = lock_new_mtx_[lock_new_count_];
+      lock_new_tid_[idx] = lock_new_tid_[lock_new_count_];
+      --idx;
+    }
+    if (list_idx != -1) {
+      lock_active_list_[list_idx][lock_active_count_[list_idx]++] = scratch;
+    }
+  }
+
+  // If there is a list, take something from it.
+  if (list_idx != -1) {
+    // Last item left, free the list.
+    if (lock_active_count_[list_idx] == 1) {
+      scratch = lock_active_list_[list_idx][0];
+      lock_wait_free_list_[lock_wait_free_tail_] = lock_active_list_[list_idx];
+      lock_wait_free_tail_ = (lock_wait_free_tail_ + 1) % kNumThreads;
+      --lock_active_list_count_;
+      if ((int)lock_active_list_count_ > list_idx) {
+        lock_active_mtx_[list_idx] = lock_active_mtx_[lock_active_list_count_];
+        lock_active_list_[list_idx] = lock_active_list_[lock_active_list_count_];
+        lock_active_count_[list_idx] = lock_active_count_[lock_active_list_count_];
+      }
+    // Multiple element, random pick and squash.
+    } else {
+      uptr sc_idx = RandomNext(thr, COND_SIGNAL) % lock_active_count_[list_idx];
+      scratch = lock_active_list_[list_idx][sc_idx];
+      --lock_active_count_[list_idx];
+      if (lock_active_count_[list_idx] > sc_idx) {
+        lock_active_list_[list_idx][sc_idx] =
+            lock_active_list_[list_idx][lock_active_count_[list_idx]];
+      }
+    }
+  }
+
+  // If after all this a tid needs to be woken.
+  if (scratch != -1) {
+    if (thread_status_[scratch] == DISABLED) {
+      Enable(scratch);
+    }
+    thread_mtx_[scratch] = 0;
+  }
+  mtx.Unlock();
+}*/
+
+// Test
+/*void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
+  mtx.Lock();
+  int mtx_tid = -1;
+  u64 queue_pos = (u64)-1;
+  for (int i = 0; i < kNumThreads; ++i) {
+    if (thread_mtx_[i] == (atomic_uintptr_t*)m &&
+        lock_queue_pos_[i] < queue_pos) {
+      mtx_tid = i;
+      queue_pos = lock_queue_pos_[i];
+    }
+  }
+  if (mtx_tid == -1) {
+    mtx.Unlock();
+    return;
+  }
+  int tid_signal = mtx_tid;
+  if (thread_status_[tid_signal] == DISABLED) {
+    Enable(tid_signal);
+  }
+  thread_mtx_[tid_signal] = 0;
+  mtx.Unlock();
+}*/
 
 ////////////////////////////////////////
 // Processes.
@@ -479,7 +620,7 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
 // Signal handling.
 ////////////////////////////////////////
 
-bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {CHECK(false);
+bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
   mtx.Lock();
   if (DemoPlayActive() &&
       (demo_play_.signal_tick_[thr->tid] > tick_ ||
@@ -1090,7 +1231,6 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
 u64 Scheduler::RandomNumber() {
   // Reading from file only supports s64, not u64. So the MSB must be 0.
 //CHECK(ctx->scheduler.exclude_point_[cur_thread()->tid] != 1);
-++__tsan::ctx->scheduler.count;
   return xorshift128plus() >> 1;
 }
 
@@ -1159,7 +1299,8 @@ bool Scheduler::IsDemoPlayback() {
 // Other internal utilities.
 ////////////////////////////////////////
 
-/*void Scheduler::Enable(int tid) {
+#ifndef USE_EXTERNAL_SCHED
+void Scheduler::Enable(int tid) {
   cond_vars_idx_[last_free_idx_] = tid;
   cond_vars_idx_inv_[tid] = last_free_idx_++;
   thread_status_[tid] = RUNNING;
@@ -1171,7 +1312,8 @@ void Scheduler::Disable(int tid) {
   cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
   cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
   thread_status_[tid] = DISABLED;
-}*/
+}
+#endif
 
 void Scheduler::PrintUserSanitizerStackBoundary() {
   ThreadState *thr = cur_thread();
