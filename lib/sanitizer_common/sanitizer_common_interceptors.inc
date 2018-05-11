@@ -2271,6 +2271,7 @@ INTERCEPTOR(int, getsockname, int sock_fd, void *addr, int *addrlen) {FCHECK(fal
   // https://github.com/google/sanitizers/issues/321.
   //int real_fd = __tsan::ctx->scheduler.SyscallFdMap(sock_fd);
   int res = REAL(getsockname)(sock_fd, addr, addrlen);
+  __tsan::ctx->scheduler.SyscallGetsockname(&res, sock_fd, addr, (unsigned *)addrlen);
   if (res == 0) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, addr, Min(addrlen_in, *addrlen));
   }

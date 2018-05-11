@@ -1,6 +1,4 @@
-// Scheduler for tsan11 that controls the following:
-//   - Which thread can execute a pending visible instruction.
-//   - Which store a load can read from.
+// Scheduler for tsan11.
 
 #ifndef TSAN_SCHEDULE_H_
 #define TSAN_SCHEDULE_H_
@@ -11,11 +9,12 @@
 
 namespace __tsan {
 
-struct ShmProcess;
-
 // Controls scheduling, waking of threads and history.
 class Scheduler {
  public:
+  // For ease of functions that use the mutex and Wait().
+  friend struct ScopedScheduler;
+
   Scheduler();
   ~Scheduler();
 
@@ -25,33 +24,47 @@ class Scheduler {
 
   ////////////////////////////////////////
   // Core ordering functions.
+  // Dynamically bound on startup according to the chosen strategy.
   ////////////////////////////////////////
 
+ private:
+  // Dynamic bindings for the ordering functions.
+  void (Scheduler::*WaitFunc)(ThreadState *thr);
+  void (Scheduler::*TickFunc)(ThreadState *thr);
+  void (Scheduler::*EnableFunc)(int tid);
+  void (Scheduler::*DisableFunc)(int tid);
+  void (Scheduler::*RescheduleFunc)();
+  void (Scheduler::*SignalWakeFunc)(ThreadState *thr);
+
+ public:
   // Block this thread until the scheduler allows it to run.
-  void Wait(ThreadState *thr);
+  // Call immediately before a visible operation.
+  inline void Wait(ThreadState *thr) { (this->*WaitFunc)(thr); }
 
   // Uses the chosen scheduling strategy to pick the next thread to activate.
-  // Must only be called by the active thread after it has finished Wait().
-  void Tick(ThreadState *thr);
+  // Call immediately after a visible operation.
+  inline void Tick(ThreadState *thr) { (this->*TickFunc)(thr); }
+
+  // Add and remove thread tid from the list of schedulable threads.
+  // These are not asyn safe, so should only be called in a critical section, or
+  // by Reschedule() or SignalWake().
+  inline void Enable(int tid) { (this->*EnableFunc)(tid); }
+  inline void Disable(int tid) { (this->*DisableFunc)(tid); }
 
   // If the scheduler chooses a thread that does not do atomic operations, or is
   // waiting for some other thread that is blocked by the scheduler, then the
-  // program will deadlock.
-  // This will force the scheduler to choose another thread. If a demo is being
-  // recorded then the last scheduler choice will be erased. If this is a demo
-  // playback then this should not do anything.
-  // Must ONLY be called by the background thread.
-  void Reschedule();
+  // program may deadlock or become unresposive.
+  // This will force the scheduler to choose another thread.
+  // If this is a demo playback, then all the reschedules after the last Tick()
+  // and before the next Wait() will float to before the last Tick(), and this
+  // function will do nothing.
+  // Must only be called by the background thread.
+  inline void Reschedule() { (this->*RescheduleFunc)(); }
 
-  // Pick a tid to become active based on some scheduling strategy.
-  // Must pass the random number in due to replay stuff.
-  int Schedule(u64 rnd);
-
-  // Inter-process scheduling functions.
-  // Similar to inter-thread ordering, but first come first serve.
-  // Is a particular event ordered across processes.
-  //bool ProcessEventIsOrdered(EventType event_type);  // TODO
-  //void ProcessWait();
+  // If a signal is received and the thread is disabled, in must be reenabled so
+  // it can enter the signal handler.
+  // If this is a replay, this function does nothing, like Reschedule().
+  inline void SignalWake(ThreadState *thr) { (this->*SignalWakeFunc)(thr); }
 
 
   ////////////////////////////////////////
@@ -66,9 +79,9 @@ class Scheduler {
   void ThreadDelete(ThreadState *thr);
   void ThreadJoin(ThreadState *thr, int join_tid);
 
-  // All cond calls should be treated as visible instructions and so do the
-  // usual Wait'n'Tick. The sleep is also controlled by the scheduler, allowing
-  // us to deterministically choose the thread to signal.
+  // Condition variables.
+  // Conditional wait is split into two separate critical sections. The wait
+  // followed by a mutex lock when signalled.
   //
   // A thread doing a wait with timeout is not disabled, but can still eat up a
   // signal provided it has not done anything that happens after the signal.
@@ -76,9 +89,9 @@ class Scheduler {
   void CondSignal(ThreadState *thr, void *c);
   void CondBroadcast(ThreadState *thr, void *c);
 
-  // Mutex lock and unlock. It is OK to simply replace a lock() with a
-  // try_lock() loop, but results in slowdown when repeatedly being scheduled
-  // when the mutex is not free.
+  // Mutex lock and unlock. Mutex lock fail will block the thread as it will
+  // just waste time. Unlock will wake up one thread that was blocked.
+  // Successful mutex lock does not require action.
   void MutexLockFail(ThreadState *thr, void *m);
   void MutexUnlock(ThreadState *thr, void *m);
 
@@ -88,6 +101,7 @@ class Scheduler {
   // that is assigned correctly when replying.
   // Each process created has its own id, that is the same as the demo file it
   // will read from. This will be acquired from a section of shared memory.
+  // Currently disabled.
   u64 ForkBefore(ThreadState *thr);
   void ForkAfterParent(ThreadState *thr);
   void ForkAfterChild(ThreadState *thr, u64 id);
@@ -102,12 +116,6 @@ class Scheduler {
   // A signal is only received when the thread calls ProcessPendingSignals or if
   // the thread is in a blocking call such as pthread_join. Intercepted libc and
   // system calls are what lead to ProcessPendingSignals being called.
-  //
-  // When replaying, the signal should arrive at the same time, not just at the
-  // same tick. ProcessPendingSignals and blocking calls can occur many times
-  // between each tick, so a separate, thread-local epoch will be used to keep
-  // track of the number of times a signal could have potentially been received,
-  // and raise the signal on the same signal tick.
   //
   // Upon replay, all other signals are ignored. The way a scheduled signal is
   // received depends on the context. If it is through ProcessPendingSignals
@@ -136,41 +144,27 @@ class Scheduler {
   void SyscallAccept(int *ret, int sockfd, void *addr, unsigned *addrlen, unsigned addrlen_pre);
   void SyscallBind(int *ret, int fd, void *addr, uptr addrlen);
   void SyscallClock_gettime(int *ret, void *tp);
-  void SyscallClose(int *ret, int fd);
+  void SyscallClose(int *ret, int fd, void *close);
   void SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen);
   void SyscallEpoll_wait(int *ret, int epfd, void *events, int maxevents, int timeout);  // Inactive
+  void SyscallGetsockname(int *ret, int sockfd, void *addr, unsigned *addrlen);
   void SyscallGettimeofday(int *ret, void *tv, void *tz);  // Inactive
   void SyscallIoctl(int *ret, int fd, unsigned long request, void *arg);  // Inactive
   void SyscallPipe(int *ret, int pipefd[2]);
   void SyscallPoll(int *ret, void *fds, unsigned nfds, int timeout);
   void SyscallRead(sptr *ret, int fd, void *buf, uptr count, void *read);
   void SyscallRecv(sptr *ret, int sockfd, void *buf, uptr len, int flags);
-  void SyscallRecvfrom(sptr *ret, int sockfd, void *buf, uptr len, int flags,
-                       void *src_addr, int *addrlen, uptr addrlen_pre);
+  void SyscallRecvfrom(sptr *ret, int sockfd, void *buf, uptr len, int flags, void *src_addr, int *addrlen, uptr addrlen_pre);
   void SyscallRecvmsg(sptr *ret, int sockfd, void *msghdr, int flags, void *recvmsg);
   void SyscallSendmsg(sptr *ret, int sockfd, void *msghdr, int flags);
-  void SyscallSendto(sptr *ret, int sockfd, void *buf, uptr len, int flags,
-                     void *dest_addr, int addrlen);
+  void SyscallSendto(sptr *ret, int sockfd, void *buf, uptr len, int flags, void *dest_addr, int addrlen);
   void SyscallSelect(int *ret, int nfds, void *readfds, void *writefds, void *exceptfds, void *timeout, void *select);
   void SyscallWrite(sptr *ret, int fd, void *buf, uptr count, void *write);
   void SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt);
 
-  // File stuff uuuggghhhghghghhhhh.
-  // For demo playback, each process has its own file system to replay from.
-  // For normal files, this will just be a stream of what was originally read.
-  // For memory map, this will be the original contents of the mapped memory.
-  // Other file stuff (pipes, etc) can just be treated as normal files for this.
-  // Each open/close of the same file will have a separate file in the FS.
-  // Each open/close is identified by the tick on which it was opened.
-  // For example, for process 2 on tick 1234:
-  //
-  //   /data/myfile -> <demo_base>/FS2/.data.myfile1234
-  //
-  // File operations are inter-process, so need to be ordered across processes
-  // just like with forking.
-  // Tsan's fd stuff is borrowed to store the fds for reads and writes.
+  // Does not do anything.
   void FileCreate(const char *file, int *fd_replay, int *fd_record);
-  void FileRead(int *fd_replay, int *fd_record, char *buffer);
+  //void FileRead(int *fd_replay, int *fd_record, char *buffer);
 
 
   ////////////////////////////////////////
@@ -183,11 +177,8 @@ class Scheduler {
   static u64 RandomNumber();
 
   // Interface for RandomNumber() that is preferrable to calling it directly.
-  // This will handle record and replay.
-  // Has same limitations as calling RandomNumber().
-  enum EventType { END = 0,     SCHEDULE = 1, READ = 2, COND_SIGNAL = 3,
-                   PROCESS = 4, FILE = 5,     MMAP = 6, SIG_WAKEUP = 7 };
-  u64 RandomNext(ThreadState *thr, EventType event_type);
+  // Handles some cases safely that may break record and replay.
+  u64 RandomNext(ThreadState *thr);
 
 
   ////////////////////////////////////////
@@ -206,25 +197,48 @@ class Scheduler {
   bool IsDemoPlayback();
 
 
-  // For ease of functions that use the mutex and Wait().
-  friend struct ScopedScheduler;
+  // Only a static number of threads is supported due to static sized arrays.
+  static const int kNumThreads = 80;
 
-
+  // For demo event record and replay. Types of events.
+  enum EventType { END = 0, RESCHEDULE = 1, SIG_WAKEUP = 2 };
  private:
+  ////////////////////////////////////////
+  // Dynamic dispatch (for strategy).
+  ////////////////////////////////////////
+
+  // When making a scheduling strategy, consider the following:
+  // - Does it work with the event record and replay.
+  // - Does it work with time slicing.
+  // - Handle signals properly?
+
+  // Random scheduling.
+  //struct StrategyRandom;
+  void StrategyRandomInitialise();
+  void StrategyRandomWait(ThreadState *thr);
+  void StrategyRandomTick(ThreadState *thr);
+  void StrategyRandomEnable(int tid);
+  void StrategyRandomDisable(int tid);
+  void StrategyRandomReschedule();
+  void StrategyRandomSignalWake(ThreadState *thr);
+
+  // Queue scheduling.
+  //struct StrategyQueue;
+  void StrategyQueueInitialise();
+  void StrategyQueueWait(ThreadState *thr);
+  void StrategyQueueTick(ThreadState *thr);
+  void StrategyQueueEnable(int tid);
+  void StrategyQueueDisable(int tid);
+  void StrategyQueueReschedule();
+  void StrategyQueueSignalWake(ThreadState *thr);
+
+
   ////////////////////////////////////////
   // Other internal utilities.
   ////////////////////////////////////////
 
-  // When performing certain blocking calls, the thread should disable itself.
-  void Enable(int tid);
-  void Disable(int tid);
-
   // Print the frame at the top of the user stack, before entering sanitizer.
   void PrintUserSanitizerStackBoundary();
-
-
-  // Only a static number of threads is supported due to static sized arrays.
-  static const int kNumThreads = 80;
 
 
   ////////////////////////////////////////
@@ -256,11 +270,6 @@ class Scheduler {
   // Is demo playback active.
   bool DemoPlayActive();   // Enabled and not at end.
   bool DemoPlayEnabled();  // Enabled, maybe at end.
-  // Assert demo state. //TODO rest of these don't currently work.
-  void DemoPlayCheck(
-      u64 demo_tick, EventType event_type, u64 param1, u64 param2);
-  bool DemoPlayExpectParam1(u64 param1);
-  bool DemoPlayExpectParam2(u64 param2);
   // Signal replay.
   void DemoPlaySignalNext(int tid);
   // Syscall replay.
@@ -321,49 +330,20 @@ class Scheduler {
   ////////////////////////////////////////
 
   // Represents a deterministic time point for the program.
-  // This changes on each tick, and should not differ when replaying.
+  // Changes on each tick, should not differ when replaying.
   u64 tick_;
 
-  // Serves two purposes: check for concurrent accesses and synchronisation.
-  // There should be no contention for this mutex besides Reschedule().
+  // For mofifying scheduler state. Not needed for Wait(), or if the thread only
+  // modifies array at its own index.
   Mutex mtx;
 
-  // Condition variables each thread needs to wait on before proceeding.
-  // We don't want to use mutexes, as different thread will block and notify.
-  // We want a compacted array of active threads so we can easily see which
-  // threads are used and easily select one at random.
-  //static const int kNumThreads = 80;
-  static const int kInactive = 0;
-  static const int kActive = 1;
-  static const int kCritical = 2;
-  atomic_uintptr_t cond_vars_[kNumThreads];
-
-  // Allows O(1) acces to the currently active threads.
-  // cond_vars_idx_[rnd(0, last_free_idx_)] gives an active tid.
-  // cond_vars_idx_inv_[tid] with active tid gives its position cond_vars_idx_.
-  // All active tids at any point are packed in cond_vars_idx_.
-  int cond_vars_idx_[kNumThreads];
-  int cond_vars_idx_inv_[kNumThreads];
-  int last_free_idx_;
-
-  // For rescheduling during non-replay.
-  // Check if this does not change between two calls to Reschedule().
-  u64 reschedule_tick_;
+  // For any effect that may need to change which thread is running or change
+  // the state outside of Wait() and Tick() (e.g. Reschedule()).
   int active_tid_;
-  u64 stat_reschedule_;
-
-  // Auxilliary info for the scheduling strategy.
-  // Prioity based scheduling. Slightly adjust when repeatedly rescheduling.
-  static const int kMaxPri = -300;
-  static const int kMinPri = 3;
-  int pri_[kNumThreads];
 
   // For time slices.
   static const int kSliceLength = 1;
   int slice_;
-
-  // Prototype priority scheduling
-  int sys_pri_[kNumThreads];
 
   // Info for blocked threads.
   enum Status { FINISHED = 0, DISABLED = 1, CONDITIONAL = 2, RUNNING = 3 };
@@ -371,25 +351,6 @@ class Scheduler {
   int wait_tid_[kNumThreads];                   // For thread join
   atomic_uintptr_t *thread_cond_[kNumThreads];  // For conditionals
   atomic_uintptr_t *thread_mtx_[kNumThreads];   // For mutex lock TODO merge with cond.
-
-  // Prototype fast tid selection for unlock.
-  /*int               lock_new_tid_[kNumThreads];  // Pair (tid, mtx) for new
-  atomic_uintptr_t *lock_new_mtx_[kNumThreads];  // threads being blocked.
-  uptr              lock_new_count_;             // How many waiting.
-
-  int lock_wait_lists_[kNumThreads][kNumThreads];  // Threads blocked.
-
-  int *lock_wait_free_list_[kNumThreads];  // Free wait lists.
-  int lock_wait_free_head_;                // List head.
-  int lock_wait_free_tail_;                // List tail.
-
-  atomic_uintptr_t *lock_active_mtx_[kNumThreads];   // Active wait lists mtx.
-  int *             lock_active_list_[kNumThreads];  // Active wait list for mtx.
-  uptr              lock_active_count_[kNumThreads]; // Active wait list length.
-  uptr              lock_active_list_count_;          // How many lists.*/
-
-  // Prototype queue unlock.
-  //u64 lock_queue_pos_[kNumThreads];  // Tick at which lock failed.
 
   // For signals, each thread has an epoch for determinism.
   u64 signal_tick_[kNumThreads];
@@ -403,10 +364,6 @@ class Scheduler {
 
   // For excluding specific functions from the scheduler.
   int exclude_point_[kNumThreads];
-
-  // Shared memory for inter-process ordering.
-  u64 pid_;
-  struct ShmProcess *shm_process_;
 };
 
 }  // namespace __tsan

@@ -6,13 +6,8 @@
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
-//#include "sanitizer_common/sanitizer_posix.h"  // For internal_lseek
 #include "tsan_mutex.h"
 #include "tsan_rtl.h"
-
-//int tsanstart = 0;
-
-//#define USE_EXTERNAL_SCHED
 
 // For syscall record/replay.
 extern "C" int *__errno_location();
@@ -76,26 +71,6 @@ u64 xorshift128plus() {
 
 }  // namespace
 
-// Shared memory for inter-process ordering.
-struct ShmProcess {
-  ShmProcess()
-      : tick_(1), mtx_(MutexTypeShmProcess, StatMtxTotal),
-        replay_contents_(0), replay_next_(0), record_fd_(kInvalidFd) {
-  }
-  u64 tick_;
-  Mutex mtx_;
-  char *replay_contents_;  // Contents are memory mapped.
-  u64 replay_next_;        // Last in the replay.
-  fd_t record_fd_;
-};
-// We cannot just include the required headers, so the bare essentials are
-// forward declared (shmget, shmctl, shmat).
-#define IPC_RMID	0
-#define IPC_CREAT	01000
-extern "C" int shmctl(int shmid, int cmd, void *buf);
-extern "C" int shmget(int key, unsigned size, int shmflg);
-extern "C" void *shmat(int shmid, const void *shmaddr, int shmflg);
-
 // As most scheduler functions go: Wait -> Lock -> f -> Unlock -> Tick.
 struct ScopedScheduler {
   ScopedScheduler(Scheduler *scheduler, ThreadState *thr)
@@ -113,9 +88,7 @@ struct ScopedScheduler {
 
 // Start of Scheduler stuff.
 Scheduler::Scheduler()
-    : tick_(0), mtx(MutexTypeSchedule, StatMtxTotal), last_free_idx_(0),
-      reschedule_tick_(0), /*lock test*/ /*lock_new_count_(0),lock_wait_free_head_(0),lock_wait_free_tail_(0),lock_active_list_count_(0)*/ /*lock test*//*,*/ pid_(0) {
-  internal_memset(cond_vars_, kInactive, sizeof(cond_vars_));
+    : tick_(0), mtx(MutexTypeSchedule, StatMtxTotal) {
   internal_memset(thread_status_, FINISHED, sizeof(thread_status_));
   internal_memset(wait_tid_, -1, sizeof(wait_tid_));
   internal_memset(thread_cond_, 0, sizeof(thread_cond_));
@@ -123,208 +96,28 @@ Scheduler::Scheduler()
   internal_memset(exclude_point_, 0, sizeof(exclude_point_));
   internal_memset(input_fd_, 0, sizeof(input_fd_));
   internal_memset(pipe_fd_, 0, sizeof(pipe_fd_));
-//for (int i = 0; i < kNumThreads; ++i) {lock_wait_free_list_[i] = lock_wait_lists_[i];}
 }
 
 Scheduler::~Scheduler() {
-  Printf("Reschedules: %llu\n", stat_reschedule_);
   DemoRecordFinalise();
 }
 
-// For queue scheduling.
-#ifdef USE_EXTERNAL_SCHED
-#include "tsan_schedule_queue.inc"
-#endif
-
 // Assume this is the only scheduler.
 void Scheduler::Initialise() {
-  // Setup start thread.
-  // This thread will still call ThreadNew, so do not adjust last_free_idx_.
-  atomic_store(&cond_vars_[0], kActive, memory_order_relaxed);
   // Assumes ownership of PRNG buffer. Can make a member if multiple schedulers.
   s[0] = rdtsc();
   s[1] = rdtsc();
   // Time slices
   slice_ = kSliceLength;
-  stat_reschedule_ = 0;
 
-  #ifdef USE_EXTERNAL_SCHED
-  // For queue scheduling.
-  WaitQueue::WaitQueueInit();
-  #endif
+  // Select scheduler strategy
+  StrategyRandomInitialise();
+  //StrategyQueueInitialise();
 
   // Set up demo playback.
   DemoPlayInitialise();
   DemoRecordInitialise();
   input_fd_[0] = true;  // stdin
-
-  // Shared memory init.
-  /*static const*/ int key = ('t' << 24) | ('s' << 16) | ('a' << 8) | 'n';
-  //key ^= (int)(internal_getpid() & (int)-1);
-  int id = shmget(key, sizeof(ShmProcess), 0777);
-  if (id != -1) {
-    int value = shmctl(id, IPC_RMID, 0);
-    CHECK(!value && "Could not kill old shared memory.");
-  }
-  id = shmget(key, sizeof(ShmProcess), IPC_CREAT | 0777);
-  CHECK((id != -1) && "Could not create shared memory.");
-  shm_process_ = new(shmat(id, 0, 0)) ShmProcess();
-  if (DemoPlayEnabled()) {
-    // Memory map replay contents. Must have an initial entry 0.
-    char buf[128];
-    internal_snprintf(buf, 128, "%s/PROCESS", flags()->play_demo);
-    uptr size;
-    shm_process_->replay_contents_ = (char *)MapFileToMemory(buf, &size);
-    shm_process_->replay_next_ = *shm_process_->replay_contents_ == '\0' ? -1 :
-        internal_simple_strtoll(shm_process_->replay_contents_,
-                                &shm_process_->replay_contents_, 10);
-    CHECK(shm_process_->replay_next_ == 0);
-    shm_process_->replay_next_ = *shm_process_->replay_contents_ == '\0' ? -1 :
-        internal_simple_strtoll(shm_process_->replay_contents_,
-                                &shm_process_->replay_contents_, 10);
-  }
-  if (DemoRecordEnabled()) {
-    char buf[128];
-    internal_snprintf(buf, 128, "%s/PROCESS", flags()->record_demo);
-    shm_process_->record_fd_ = OpenFile(buf, WrOnly);
-    WriteToFile(shm_process_->record_fd_, "0\n", internal_strlen("0\n"));
-  }
-}
-
-
-////////////////////////////////////////
-// Core ordering functions.
-////////////////////////////////////////
-
-#ifndef USE_EXTERNAL_SCHED
-void Scheduler::Wait(ThreadState *thr) {
-  uptr cmp = kActive;
-  while (!atomic_compare_exchange_strong(
-      &cond_vars_[thr->tid], &cmp, kCritical, memory_order_relaxed)) {
-    CHECK(cmp == kInactive);
-    cmp = kActive;
-    // Racy
-    //pri_[thr->tid] = kMaxPri;
-    //ProcessPendingSignals(thr);  // Dangerous, must change.
-    proc_yield(20);
-  }
-}
-
-void Scheduler::Tick(ThreadState *thr) {
-  mtx.Lock();
-  uptr cmp = kCritical;
-  bool is_critical = atomic_compare_exchange_strong(
-      &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
-  CHECK(is_critical);
-
-  // If annotated out, immedaitely reenable this thread.
-  if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
-    atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-    mtx.Unlock();
-    return;
-  }
-  //{  // DEBUG
-  //  Printf("%d - %d - ", thr->tid, tick_);
-  //  PrintUserSanitizerStackBoundary();
-  //  Printf("\n");
-  //}
-
-  if (pri_[thr->tid] > kMaxPri) {
-    pri_[thr->tid] = kMaxPri;
-  }
-  // Check for signals if replay.
-  SignalPending(thr);
-  // Now to find the next tid to activate.
-  int next_tid;
-  u64 rnd = RandomNext(thr, SCHEDULE);
-  if (rnd == (u64)-1) {
-    for (u64 demo_skip = demo_play_.rnd_skip_; demo_skip > 0; --demo_skip) {
-      int skip_tid = Schedule(RandomNumber());
-      if (pri_[skip_tid] < kMinPri) {
-        ++pri_[skip_tid];
-      }
-    }
-    next_tid = Schedule(RandomNumber());
-    slice_ = kSliceLength;
-    CHECK((u64)next_tid == demo_play_.event_param_);
-  } else {
-    // Slice check
-    if (slice_ > 1 && thread_status_[thr->tid] == RUNNING) {
-      next_tid = thr->tid;
-      --slice_;
-    } else {
-      next_tid = Schedule(rnd);
-      slice_ = kSliceLength;
-    }
-  }
-  CHECK(thread_status_[next_tid] == RUNNING ||
-      (next_tid == 0 && last_free_idx_ == 0));
-  active_tid_ = next_tid;
-  // Check for signals if replay.
-  //SignalPending(thr);
-  // Activate chosen next tid.
-  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
-  mtx.Unlock();
-  ProcessPendingSignals(thr);
-}
-
-void Scheduler::Reschedule() {
-  mtx.Lock();
-  if (DemoPlayActive() || last_free_idx_ <= 1 || tick_ != reschedule_tick_ ||
-      exclude_point_[active_tid_] == 1) {
-    reschedule_tick_ = tick_;
-    mtx.Unlock();
-    return;
-  }
-  int tid = active_tid_;
-  uptr cmp = kActive;
-  bool is_active = atomic_compare_exchange_strong(
-      &cond_vars_[tid], &cmp, kInactive, memory_order_relaxed);
-  if (!is_active) {
-    CHECK(cmp == kCritical);
-    mtx.Unlock();
-    return;
-  }
-  if (pri_[tid] < kMinPri) {
-    ++pri_[tid];
-  }
-  int next_tid = Schedule(RandomNumber());
-  slice_ = kSliceLength;
-  ++stat_reschedule_;
-  CHECK(thread_status_[next_tid] == RUNNING);
-  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
-  active_tid_ = next_tid;
-  DemoRecordOverride(tick_ - 1, SCHEDULE, next_tid, 1);
-  mtx.Unlock();
-}
-#endif
-
-int Scheduler::Schedule(u64 rnd) {
-  if (last_free_idx_ == 0) {
-    return 0;
-  }
-  if (last_free_idx_ == 1) {
-    return cond_vars_idx_[0];
-  }
-  // Check if the rnd is a miss in the scheduling table.
-  u64 row = rnd / last_free_idx_;
-  int col = rnd % last_free_idx_;
-  int pri = pri_[cond_vars_idx_[col]];
-  int hit_rate = (pri < 0 ? -pri : pri) + 2;
-  if (!(row % hit_rate > 0) != !(pri > 0)) {
-    return cond_vars_idx_[col];
-  }
-  // rnd is a miss, row number is squashed and becomes new rnd.
-  // Second lookup with new rnd ignores missed tid.
-  u64 new_rnd = row / hit_rate;
-  if (pri > 0) {
-    new_rnd = row - new_rnd - 1;
-  }
-  int new_col = new_rnd % (last_free_idx_ - 1);
-  if (new_col >= col) {
-    ++new_col;
-  }
-  return cond_vars_idx_[new_col];
 }
 
 
@@ -339,9 +132,6 @@ int Scheduler::Schedule(u64 rnd) {
 void Scheduler::ThreadNew(ThreadState *thr, int tid) {
   ScopedScheduler scoped(this, thr);
   Enable(tid);
-  if (thr->tid != tid) {
-    atomic_store(&cond_vars_[tid], kInactive, memory_order_relaxed);
-  }
 }
 
 void Scheduler::ThreadDelete(ThreadState *thr) {
@@ -397,7 +187,7 @@ void Scheduler::CondSignal(ThreadState *thr, void *c) {
   if (count == 0) {
     return;
   }
-  int tid_signal = cond_tids[RandomNext(thr, COND_SIGNAL) % count];
+  int tid_signal = cond_tids[RandomNext(thr) % count];
   if (thread_status_[tid_signal] == DISABLED) {
     Enable(tid_signal);
   }
@@ -420,21 +210,8 @@ void Scheduler::MutexLockFail(ThreadState *thr, void *m) {
   mtx.Lock();
   Disable(thr->tid);
   thread_mtx_[thr->tid] = (atomic_uintptr_t*)m;
-// Test
-//lock_queue_pos_[thr->tid] = atomic_load(&WaitQueue::queue_head, memory_order_relaxed);
-//
   mtx.Unlock();
 }
-
-/*void Scheduler::MutexLockFail(ThreadState *thr, void *m) {
-  mtx.Lock();
-  Disable(thr->tid);
-  thread_mtx_[thr->tid] = (atomic_uintptr_t*)m;
-  int idx = lock_new_count_++;
-  lock_new_mtx_[idx] = (atomic_uintptr_t*)m;
-  lock_new_tid_[idx] = thr->tid;
-  mtx.Unlock();
-}*/
 
 void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
   mtx.Lock();
@@ -449,7 +226,7 @@ void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
     mtx.Unlock();
     return;
   }
-  int tid_signal = mtx_tids[RandomNext(thr, COND_SIGNAL) % count];
+  int tid_signal = mtx_tids[RandomNext(thr) % count];
   if (thread_status_[tid_signal] == DISABLED) {
     Enable(tid_signal);
   }
@@ -457,222 +234,46 @@ void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
   mtx.Unlock();
 }
 
-//test
-/*void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
-  atomic_uintptr_t *lock_wait_mtx = (atomic_uintptr_t *)m;
-  int               list_idx = -1; // List of tids waiting.
-  int               scratch = -1;  // Avoid allocating list if only one thread to wake.
-  mtx.Lock();
-
-  // First see if there is an active list for this mtx.
-  for (uptr idx = 0; idx < lock_active_list_count_; ++idx) {
-    if (lock_wait_mtx == lock_active_mtx_[idx]) {
-      list_idx = idx;
-      break;
-    }
-  }
-
-  // Go through list of newly awaiting threads and adopt those waiting on m.
-  for (uptr idx = 0; idx < lock_new_count_; ++idx) {
-    if (lock_wait_mtx != lock_new_mtx_[idx]) {
-      continue;
-    }
-    // If there is no list then 'allocate' new one.
-    if (list_idx == -1 && scratch != -1) {
-      // Take next free list from the static pool.
-      int list_free_idx = lock_wait_free_head_;
-      lock_wait_free_head_ = (lock_wait_free_head_ + 1) % kNumThreads;
-      CHECK(lock_wait_free_head_ != lock_wait_free_tail_ && "list leak");
-      int *list = lock_wait_free_list_[list_free_idx];
-      // Place in list of active.
-      list_idx = lock_active_list_count_++;
-      lock_active_mtx_[list_idx] = lock_wait_mtx;
-      lock_active_list_[list_idx] = list;
-      lock_active_count_[list_idx] = 1;
-      list[0] = scratch;
-    }
-    scratch = lock_new_tid_[idx];
-    --lock_new_count_;
-    if (lock_new_count_ > idx) {
-      lock_new_mtx_[idx] = lock_new_mtx_[lock_new_count_];
-      lock_new_tid_[idx] = lock_new_tid_[lock_new_count_];
-      --idx;
-    }
-    if (list_idx != -1) {
-      lock_active_list_[list_idx][lock_active_count_[list_idx]++] = scratch;
-    }
-  }
-
-  // If there is a list, take something from it.
-  if (list_idx != -1) {
-    // Last item left, free the list.
-    if (lock_active_count_[list_idx] == 1) {
-      scratch = lock_active_list_[list_idx][0];
-      lock_wait_free_list_[lock_wait_free_tail_] = lock_active_list_[list_idx];
-      lock_wait_free_tail_ = (lock_wait_free_tail_ + 1) % kNumThreads;
-      --lock_active_list_count_;
-      if ((int)lock_active_list_count_ > list_idx) {
-        lock_active_mtx_[list_idx] = lock_active_mtx_[lock_active_list_count_];
-        lock_active_list_[list_idx] = lock_active_list_[lock_active_list_count_];
-        lock_active_count_[list_idx] = lock_active_count_[lock_active_list_count_];
-      }
-    // Multiple element, random pick and squash.
-    } else {
-      uptr sc_idx = RandomNext(thr, COND_SIGNAL) % lock_active_count_[list_idx];
-      scratch = lock_active_list_[list_idx][sc_idx];
-      --lock_active_count_[list_idx];
-      if (lock_active_count_[list_idx] > sc_idx) {
-        lock_active_list_[list_idx][sc_idx] =
-            lock_active_list_[list_idx][lock_active_count_[list_idx]];
-      }
-    }
-  }
-
-  // If after all this a tid needs to be woken.
-  if (scratch != -1) {
-    if (thread_status_[scratch] == DISABLED) {
-      Enable(scratch);
-    }
-    thread_mtx_[scratch] = 0;
-  }
-  mtx.Unlock();
-}*/
-
-// Test
-/*void Scheduler::MutexUnlock(ThreadState *thr, void *m) {
-  mtx.Lock();
-  int mtx_tid = -1;
-  u64 queue_pos = (u64)-1;
-  for (int i = 0; i < kNumThreads; ++i) {
-    if (thread_mtx_[i] == (atomic_uintptr_t*)m &&
-        lock_queue_pos_[i] < queue_pos) {
-      mtx_tid = i;
-      queue_pos = lock_queue_pos_[i];
-    }
-  }
-  if (mtx_tid == -1) {
-    mtx.Unlock();
-    return;
-  }
-  int tid_signal = mtx_tid;
-  if (thread_status_[tid_signal] == DISABLED) {
-    Enable(tid_signal);
-  }
-  thread_mtx_[tid_signal] = 0;
-  mtx.Unlock();
-}*/
 
 ////////////////////////////////////////
 // Processes.
 ////////////////////////////////////////
 
-// Check if the next forked process is done by this thread.
-// Check if shm specifies this process
 u64 Scheduler::ForkBefore(ThreadState *thr) {
-  mtx.Lock();
-  DemoPlayCheck(tick_, PROCESS, (u64)thr->tid, (u64)-1);
-  u64 new_id;
-  for (;;) {
-    shm_process_->mtx_.Lock();
-    new_id = shm_process_->tick_;
-    if (DemoPlayExpectParam2(new_id) && (!DemoPlayEnabled() ||
-        (shm_process_->replay_next_ == (u64)-1 ||
-         shm_process_->replay_next_ == pid_))) {
-      break;
-    }
-    shm_process_->mtx_.Unlock();
-    proc_yield(20);
-  }
-  DemoPlayNext();
-  if (DemoPlayEnabled()) {
-    shm_process_->replay_next_ = *shm_process_->replay_contents_ == '\0' ? -1 :
-        internal_simple_strtoll(shm_process_->replay_contents_,
-                                &shm_process_->replay_contents_, 10);
-  }
-  DemoRecordNext(tick_, PROCESS, thr->tid, new_id);
-  if (DemoRecordEnabled()) {
-    char buf[32];
-    internal_snprintf(buf, 32, "%llu\n", pid_);
-    WriteToFile(shm_process_->record_fd_, buf, internal_strlen(buf));
-  }
-  ++shm_process_->tick_;
-  shm_process_->mtx_.Unlock();
-  ++tick_;
-  mtx.Unlock();
-  return new_id;
+  CHECK(false && "Processes disabled in tsan scheduling.");
+  return 0;
 }
 
 void Scheduler::ForkAfterParent(ThreadState *thr) {
+  CHECK(false && "Processes disabled in tsan scheduling.");
 }
 
 void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
-  pid_ = id;
-  s[0] = rdtsc();
-  s[1] = rdtsc();
-  DemoPlayInitialise();
-  CloseFile(demo_record_.record_fd_);
-  CloseFile(demo_record_.signal_fd_);
-  CloseFile(demo_record_.syscall_fd_);
-  DemoRecordInitialise();
+  CHECK(false && "Processes disabled in tsan scheduling.");
 }
+
 
 ////////////////////////////////////////
 // Signal handling.
 ////////////////////////////////////////
 
 bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
+  SignalWake(thr);
   mtx.Lock();
-  if (DemoPlayActive() &&
-      (demo_play_.signal_tick_[thr->tid] > tick_ ||
-       demo_play_.signal_num_[thr->tid] != signum)) {
+  // Signals on replay are all ignored except the ones that are replayed.
+  // Not safe in excluded regions.
+  if ((DemoPlayActive() &&
+       (demo_play_.signal_tick_[thr->tid] >= tick_ ||  // TODO make test equal
+        demo_play_.signal_num_[thr->tid] != signum)) ||
+      exclude_point_[thr->tid] == 1) {
     mtx.Unlock();
     return false;
   }
-  // Temp maybe, not sure about this.
-  if (exclude_point_[thr->tid] == 1) {
-    mtx.Unlock();
-    return false;
-  }
-  // Prevent this function from being reentrant during replay.
-  demo_play_.signal_num_[thr->tid] = -1;
-  // If the thread is blocked then wakeup. This is for non-replay, the replay
-  // counterpart is the SIG_WAKEUP handling in SignalPending().
-  bool is_blocked = thread_status_[thr->tid] == DISABLED;
-  if (is_blocked && !DemoPlayEnabled()) {
-    // Part 1, wait until no thread is critical.
-    bool is_active = false;
-    while (!is_active) {
-      mtx.Unlock();
-      proc_yield(20);
-      uptr cmp = kActive;
-      mtx.Lock();
-      is_active = atomic_compare_exchange_strong(
-          &cond_vars_[active_tid_], &cmp, kInactive, memory_order_relaxed);
-    }
-    // This is restrictive, and only required if you plan disable post signal.
-    bool is_still_blocked = thread_status_[thr->tid] == DISABLED;
-    bool by_conditional = is_still_blocked && wait_tid_[thr->tid] == -1 &&
-        thread_mtx_[thr->tid] == 0 && thread_cond_[thr->tid] != 0;
-    if (is_still_blocked && !by_conditional) {
-      thread_cond_[thr->tid] = 0;
-    }
-    // Part 2, enable even if it has already been reenabled, record SIG_WAKEUP.
-    Enable(thr->tid);
-    int next_tid = Schedule(RandomNumber());
-    CHECK(thread_status_[next_tid] == RUNNING);
-    atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
-    active_tid_ = next_tid;
-    DemoRecordOverride(tick_ - 1, SIG_WAKEUP, thr->tid, 1);
-    ++tick_;
-  }
-  // Standard Wait and Tick around entrance to signal handler.
+  // Signal handler will be entered after returning true.
   mtx.Unlock();
-  Wait(thr);
-  mtx.Lock();
+  ScopedScheduler scoped(this, thr);
   DemoRecordSignalNext(thr->tid, signal_tick_[thr->tid], signum);
   DemoPlaySignalNext(thr->tid);
-  mtx.Unlock();
-  Tick(thr);
   return true;
 }
 
@@ -681,33 +282,9 @@ void Scheduler::SignalPending(ThreadState *thr) {
   if (!DemoPlayEnabled()) {
     return;
   }
-  // First see if the next time this thread Wait()s is for signal and raise.
   if (demo_play_.signal_tick_[thr->tid] == tick_) {
     rtl_internal_sighandler(demo_play_.signal_num_[thr->tid]);
   }
-  // This is the replay counterpart to the SIG_WAKEUP in SignalReceive().
-  DemoPlayPeekNext();
-  while (demo_play_.event_type_ == SIG_WAKEUP &&
-         demo_play_.demo_tick_ == tick_) {
-    for (u64 demo_skip = demo_play_.rnd_skip_; demo_skip > 0; --demo_skip) {
-      int skip_tid = Schedule(RandomNumber());
-      if (pri_[skip_tid] < kMinPri) {
-        ++pri_[skip_tid];
-      }
-    }
-    int wakeup_tid = demo_play_.event_param_;
-    bool is_still_blocked = thread_status_[wakeup_tid] == DISABLED;
-    bool by_conditional = is_still_blocked && wait_tid_[wakeup_tid] == -1 &&
-        thread_mtx_[wakeup_tid] == 0 && thread_cond_[wakeup_tid] != 0;
-    if (is_still_blocked && !by_conditional) {
-      thread_cond_[wakeup_tid] = 0;
-    }
-    Enable(demo_play_.event_param_);
-    DemoRecordNext(tick_, SIG_WAKEUP, wakeup_tid, demo_play_.rnd_skip_);
-    ++tick_;
-    DemoPlayPeekNext();
-  }
-  // TODO Now see if a thread needs to be blocked.
 }
 
 ////////////////////////////////////////
@@ -769,18 +346,17 @@ void Scheduler::SyscallClock_gettime(int *ret, void *tp) {
   *__errno_location() = errno_;
 }
 
-void Scheduler::SyscallClose(int *ret, int fd) {  // TODO is the non-ordered case deterministic?
-  bool ordered = input_fd_[fd] || pipe_fd_[fd];
-  if (ordered) {
-    Wait(cur_thread());
+void Scheduler::SyscallClose(int *ret, int fd, void *close) {  // TODO is the non-ordered case deterministic?
+  typedef int (*close_t)(int);
+  close_t close_ = (close_t)close;
+  if (!(input_fd_[fd] || pipe_fd_[fd])) {
+    *ret = close_(fd);
+    return;
   }
-  mtx.Lock();
+  ScopedScheduler scoped(this, cur_thread());
+  *ret = close_(fd);
   input_fd_[fd] = 0;
   pipe_fd_[fd] = 0;
-  mtx.Unlock();
-  if (ordered) {
-    Tick(cur_thread());
-  }
 }
 
 void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {
@@ -808,39 +384,31 @@ void Scheduler::SyscallConnect(int *ret, int sockfd, void *addr, uptr addrlen) {
   DemoRecordSyscallNext("connect", 2, params, param_size);
 }
 
-// TODO For now, always rec/rep epfd and all event fds.
 void Scheduler::SyscallEpoll_wait(int *ret, int epfd, void *events, int maxevents, int timeout) {
-  /*int errno_ = *__errno_location();
-  struct epoll_event *epoll_events = (struct epoll_event *)events;
-  CHECK(maxevents <= 64 && "Error: too many events in epoll_wait");
-  void *params[66] = {ret, &errno_};
-  uptr param_size[66] = {sizeof(int), sizeof(int)};
-  for (uptr p = 0; p < (uptr)maxevents; ++p) {
-    params[p + 2] = &epoll_events[p];
-    param_size[p + 2] = sizeof(struct epoll_event);
+  // Will not work due to hidden info
+  CHECK(false && "Cannot due epoll atm.");
+}
+
+void Scheduler::SyscallGetsockname(int *ret, int sockfd, void *addr, unsigned *addrlen) {
+  int errno_ = *__errno_location();
+  if (!input_fd_[sockfd]) {
+    return;
   }
+  void *params[3] = {ret, addr, addrlen};
+  uptr param_size[3] = {sizeof(int), *addrlen, sizeof(unsigned)};
   ScopedScheduler scoped(this, cur_thread());
-  DemoPlaySyscallNext("epoll_wait", maxevents + 2, params, param_size);
-  DemoRecordSyscallNext("epoll_wait", maxevents + 2, params, param_size);
-  *__errno_location() = errno_;*/
+  DemoPlaySyscallNext("getsockname", 3, params, param_size);
+  DemoRecordSyscallNext("getsockname", 3, params, param_size);
+  *__errno_location() = errno_;
 }
 
 void Scheduler::SyscallGettimeofday(int *ret, void *tv, void *tz) {
-  /*CHECK(tz == nullptr);
-  void *params[2] = {ret, tv};
-  uptr param_size[2] = {sizeof(int), timeval_sz};
-  ScopedScheduler scoped(this, cur_thread());
-  DemoPlaySyscallNext("gettimeofday", 2, params, param_size);
-  DemoRecordSyscallNext("gettimeofday", 2, params, param_size);*/
+  // Meh
 }
 
 void Scheduler::SyscallIoctl(
     int *ret, int fd, unsigned long request, void *arg) {
-  //Printf("Intercepting: ioctl %d\n", fd);
-  //void *params[2] = {ret, arg};
-  //uptr param_size[2] = {sizeof(int), IOC_SIZE(request)};
-  //DemoPlaySyscallNext("ioctl", 2, params, param_size);
-  //DemoRecordSyscallNext("ioctl", 2, params, param_size);
+  // Ask for contents, too risky
 }
 
 void Scheduler::SyscallPipe(int *ret, int pipefd[2]) {
@@ -965,7 +533,7 @@ void Scheduler::SyscallRecvfrom(
 static bool ReadCmsgHdr(void *msghdr, int *scm_fds, int *scm_fds_count) {
   const unsigned kCmsgDataOffset =
       RoundUpTo(sizeof(__sanitizer_cmsghdr), sizeof(uptr));
-  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;    if (msg->msg_controllen == 56) msg->msg_controllen = 32;
+  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;   /* if (msg->msg_controllen == 56) msg->msg_controllen = 32;*/
   char *p = (char *)((__sanitizer_msghdr *)msg)->msg_control;
   char *const control_end = p + msg->msg_controllen;
   bool has_ancilliary = false;
@@ -1201,26 +769,7 @@ void Scheduler::SyscallWritev(sptr *ret, int fd, void *iov, int iovcnt) {//TODO
 }
 
 void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
-  char path[256];
-  internal_snprintf(path, 256, "%s", file);
-  for (int idx = 0; idx < 256 && path[idx] != '\0'; ++idx) {
-    if (path[idx] == '/') {
-      path[idx] = '.';
-    }
-  }
-
-  if (flags()->play_demo && flags()->play_demo[0]) {
-    InternalScopedBuffer<char> buf(512);
-    internal_snprintf(buf.data(), buf.size(), "%s/FS%d/%s%d",
-        flags()->play_demo, pid_, path, tick_);
-    *fd_replay = OpenFile(buf.data(), WrOnly);
-  }
-  if (flags()->record_demo && flags()->record_demo[0]) {
-    InternalScopedBuffer<char> buf(512);
-    internal_snprintf(buf.data(), buf.size(), "%s/FS%d/%s%d",
-        flags()->record_demo, pid_, path, tick_);
-    *fd_record = OpenFile(buf.data(), WrOnly);
-  }
+  // Does nothing.
 }
 
 
@@ -1230,26 +779,18 @@ void Scheduler::FileCreate(const char *file, int *fd_replay, int *fd_record) {
 
 u64 Scheduler::RandomNumber() {
   // Reading from file only supports s64, not u64. So the MSB must be 0.
-//CHECK(ctx->scheduler.exclude_point_[cur_thread()->tid] != 1);
+  //CHECK(ctx->scheduler.exclude_point_[cur_thread()->tid] != 1);
   return xorshift128plus() >> 1;
 }
 
-u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
+u64 Scheduler::RandomNext(ThreadState *thr) {
+  // Exclude points have no determinism in how many times they call the rng.
+  // Returning 1 helps to reduce non-determinism (e.g. reads from buffer will
+  // always go to the end).
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     return 1;
   }
-  DemoPlayPeekNext();
-  u64 return_param;
-  if (DemoPlayActive() && tick_ == demo_play_.demo_tick_) {
-    CHECK(event_type == demo_play_.event_type_);
-    return_param = (u64)-1;
-    DemoRecordNext(
-        tick_, event_type, demo_play_.event_param_, demo_play_.rnd_skip_);
-  } else {
-    return_param = RandomNumber();
-  }
-  ++tick_;
-  return return_param;
+  return RandomNumber();
 }
 
 
@@ -1259,37 +800,29 @@ u64 Scheduler::RandomNext(ThreadState *thr, EventType event_type) {
 
 void Scheduler::AnnotateExcludeEnter() {
   ThreadState *thr = cur_thread();
-  Wait(thr);
+  ScopedScheduler scoped(this, thr);
   CHECK(exclude_point_[thr->tid] != 1);
   exclude_point_[thr->tid] = 1;
-  atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
-  // Must tick here as if this thread is disabled, the first op in another
-  // thread will share the same tick as this, and if that op is in the replay
-  // file it will be scheduled over this.
-  {  // DEBUG
-//    Printf("%d - %d - EXCLUSION - ", thr->tid, tick_);
-//    PrintUserSanitizerStackBoundary();
-//    Printf("\n");
-  }
-  SignalPending(thr);
-  ++tick_;
-  ProcessPendingSignals(thr);
 }
 
 void Scheduler::AnnotateExcludeExit() {
   ThreadState *thr = cur_thread();
-  atomic_store(&cond_vars_[thr->tid], kCritical, memory_order_relaxed);
+  ScopedScheduler scoped(this, thr);
   CHECK(exclude_point_[thr->tid] == 1);
   exclude_point_[thr->tid] = 0;
-  Tick(thr);
 }
 
-void Scheduler::AEx() { ctx->scheduler.AnnotateExcludeEnter(); }
-void Scheduler::ARe() { ctx->scheduler.AnnotateExcludeExit(); }
+void Scheduler::AEx() {
+  ctx->scheduler.AnnotateExcludeEnter();
+}
+
+void Scheduler::ARe() {
+  ctx->scheduler.AnnotateExcludeExit();
+}
 
 bool Scheduler::IsDemoPlayback() {
   mtx.Lock();
-  bool ret = DemoPlayActive();
+  bool ret = DemoPlayActive();  // kinda racy.
   mtx.Unlock();
   return ret;
 }
@@ -1298,22 +831,6 @@ bool Scheduler::IsDemoPlayback() {
 ////////////////////////////////////////
 // Other internal utilities.
 ////////////////////////////////////////
-
-#ifndef USE_EXTERNAL_SCHED
-void Scheduler::Enable(int tid) {
-  cond_vars_idx_[last_free_idx_] = tid;
-  cond_vars_idx_inv_[tid] = last_free_idx_++;
-  thread_status_[tid] = RUNNING;
-  pri_[tid] = kMaxPri;
-}
-
-void Scheduler::Disable(int tid) {
-  int tid_last_idx = cond_vars_idx_[--last_free_idx_];
-  cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
-  cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];
-  thread_status_[tid] = DISABLED;
-}
-#endif
 
 void Scheduler::PrintUserSanitizerStackBoundary() {
   ThreadState *thr = cur_thread();
@@ -1350,7 +867,7 @@ void Scheduler::DemoPlayInitialise() {
   uptr buffer_size;
   uptr contents_size;
   char buf[128];
-  internal_snprintf(buf, 128, "%s/%d", flags()->play_demo, pid_);
+  internal_snprintf(buf, 128, "%s/ASYNC", flags()->play_demo);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.demo_contents_, &buffer_size, &contents_size));
   CHECK(demo_play_.demo_contents_[0] != 0);
@@ -1360,21 +877,15 @@ void Scheduler::DemoPlayInitialise() {
   s[1] = internal_simple_strtoll(
       demo_play_.demo_contents_, &demo_play_.demo_contents_, 10);
   DemoPlayNext();
-  // For backward compatability, pid 0 is empty string.
-  char pid_buf[5];
-  internal_snprintf(pid_buf, 5, "%d", pid_);
-  if (pid_ == 0) {
-    pid_buf[0] = '\0';
-  }
   // SIGNAL setup
-  internal_snprintf(buf, 128, "%s/SIGNAL%s", flags()->play_demo, pid_buf);
+  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->play_demo);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.signal_contents_, &buffer_size, &contents_size));
   for (int tid = 0; tid < kNumThreads; ++tid) {
     DemoPlaySignalNext(tid);
   }
   // SYSCALL setup
-  internal_snprintf(buf, 128, "%s/SYSCALL%s", flags()->play_demo, pid_buf);
+  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->play_demo);
   CHECK(ReadFileToBuffer(
       buf, &demo_play_.syscall_contents_, &buffer_size, &contents_size));
 }
@@ -1401,30 +912,12 @@ void Scheduler::DemoPlayPeekNext() {
 }
 
 bool Scheduler::DemoPlayActive() {
-  return demo_play_.play_demo_ && demo_play_.event_type_ != END;
+  return demo_play_.play_demo_ &&
+      (demo_play_.event_type_ != END || tick_ <= demo_play_.demo_tick_);
 }
 
 bool Scheduler::DemoPlayEnabled() {
   return demo_play_.play_demo_;
-}
-
-void Scheduler::DemoPlayCheck(
-    u64 demo_tick, EventType event_type, u64 param1, u64 param2) {
-  if (!DemoPlayActive()) {
-    return;
-  }
-  CHECK(demo_tick == (u64)-1 || demo_tick == demo_play_.demo_tick_);
-  CHECK(event_type == END || event_type == demo_play_.event_type_);
-  CHECK(param1 == (u64)-1 || param1 == demo_play_.event_param_);
-  CHECK(param2 == (u64)-1 || param1 == demo_play_.rnd_skip_);
-}
-
-bool Scheduler::DemoPlayExpectParam1(u64 param1) {
-  return !DemoPlayActive() || param1 == demo_play_.event_param_;
-}
-
-bool Scheduler::DemoPlayExpectParam2(u64 param2) {
-  return !DemoPlayActive() || param2 == demo_play_.rnd_skip_;
 }
 
 void Scheduler::DemoPlaySignalNext(int tid) {
@@ -1511,20 +1004,14 @@ void Scheduler::DemoRecordInitialise() {
     return;
   }
   char buf[128];
-  internal_snprintf(buf, 128, "%s/%d", flags()->record_demo, pid_);
+  internal_snprintf(buf, 128, "%s/ASYNC", flags()->record_demo);
   demo_record_.record_fd_ = OpenFile(buf, WrOnly);
   internal_snprintf(buf, 128, "%llu %llu\n", s[0], s[1]);
   WriteToFile(demo_record_.record_fd_, buf, internal_strlen(buf));
   demo_record_.demo_tick_ = -1;
   demo_record_.event_type_ = END;
-  // For backward compatability, pid 0 is empty string.
-  char pid_buf[5];
-  internal_snprintf(pid_buf, 5, "%d", pid_);
-  if (pid_ == 0) {
-    pid_buf[0] = '\0';
-  }
   // SIGNAL setup
-  internal_snprintf(buf, 128, "%s/SIGNAL%s", flags()->record_demo, pid_buf);
+  internal_snprintf(buf, 128, "%s/SIGNAL", flags()->record_demo);
   demo_record_.signal_fd_ = OpenFile(buf, WrOnly);
   for (int tid = 0; tid < kNumThreads; ++tid) {
     demo_record_.signal_file_pos_[tid] =
@@ -1535,7 +1022,7 @@ void Scheduler::DemoRecordInitialise() {
     WriteToFile(demo_record_.signal_fd_, buf, internal_strlen(buf));
   }
   // SYSCALL setup
-  internal_snprintf(buf, 128, "%s/SYSCALL%s", flags()->record_demo, pid_buf);
+  internal_snprintf(buf, 128, "%s/SYSCALL", flags()->record_demo);
   demo_record_.syscall_fd_ = OpenFile(buf, WrOnly);
 }
 
@@ -1543,7 +1030,7 @@ void Scheduler::DemoRecordFinalise() {
   if (!DemoRecordEnabled()) {
     return;
   }
-  // First call writes the previous entry, second call wites the END entry.
+  // The last record is buffered, second call causes the first to be written.
   DemoRecordNext(tick_, END, 0, 0);
   DemoRecordNext(tick_, END, 0, 0);
   // Signal
@@ -1551,8 +1038,7 @@ void Scheduler::DemoRecordFinalise() {
     internal_lseek(demo_record_.signal_fd_,
         demo_record_.signal_file_pos_[tid], SEEK_SET);
     char line[65];
-    DemoRecordSignalLine(line,
-        tid,0,0/*tid, demo_record_.signal_tick_[tid], demo_record_.signal_num_[tid]*/);
+    DemoRecordSignalLine(line, tid, 0, 0);
     WriteToFile(demo_record_.signal_fd_, line, 64);
   }
 }
@@ -1583,10 +1069,9 @@ void Scheduler::DemoRecordOverride(
   if (!DemoRecordEnabled()) {
     return;
   }
-  if (demo_record_.demo_tick_ == tick) {
+  if (demo_record_.demo_tick_ == tick && demo_record_.event_type_ == type) {
     // If the current tick has demo information.
-    CHECK(demo_record_.event_type_ == type); // This will fail.
-    demo_record_.event_param_ = param;
+    demo_record_.event_param_ += param;
     demo_record_.rnd_skip_ += rnd_skip;
   } else {
     // No demo information. It is the previous tick we are rescheduling.

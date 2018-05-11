@@ -1699,8 +1699,8 @@ TSAN_INTERCEPTOR(int, close, int fd) {FCHECK(false&&"close");
   SCOPED_TSAN_INTERCEPTOR(close, fd);
   if (fd >= 0)
     FdClose(thr, pc, fd);
-  int ret = REAL(close)(fd);
-  __tsan::ctx->scheduler.SyscallClose(&ret, fd);
+  int ret;// = REAL(close)(fd);
+  __tsan::ctx->scheduler.SyscallClose(&ret, fd, (void *)REAL(close));
   return ret;
 }
 

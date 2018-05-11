@@ -294,7 +294,7 @@ bool StoreBuffer::FetchStore(ThreadState *thr, u64 *val, SyncClock **clock,
   while (limit != 0 &&
          ((is_sc_access && limit->is_sc_access_ && limit != last_sc_store) ||
 //         (rdtsc() & 4)))
-         (ctx->scheduler.RandomNext(thr, Scheduler::READ) & 1)))
+         (ctx->scheduler.RandomNext(thr) & 1)))
     limit = limit->next_;
   if (limit == 0) {
     pos_[thr->tid] = last_pos_ + 1;
