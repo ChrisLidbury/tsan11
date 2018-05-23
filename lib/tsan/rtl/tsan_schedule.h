@@ -73,8 +73,7 @@ class Scheduler {
   ////////////////////////////////////////
 
   // Thread update functions.
-  // Change scheduler when threads change.
-  // Usually only necessary for thread creation, finishing and joining.
+  // Only necessary for thread creation, finishing and joining.
   void ThreadNew(ThreadState *thr, int tid);
   void ThreadDelete(ThreadState *thr);
   void ThreadJoin(ThreadState *thr, int join_tid);
@@ -95,7 +94,7 @@ class Scheduler {
   void MutexLockFail(ThreadState *thr, void *m);
   void MutexUnlock(ThreadState *thr, void *m);
 
-  // Forking off processes is also deterministic.
+  // Forking off processes.
   // For demo record/replay, a simple high level scheduler is used to ensure
   // they are created in the same order and that they get their own demo file,
   // that is assigned correctly when replying.
@@ -330,7 +329,7 @@ class Scheduler {
   ////////////////////////////////////////
 
   // Represents a deterministic time point for the program.
-  // Changes on each tick, should not differ when replaying.
+  // Changes on each Tick(), should not differ when replaying.
   u64 tick_;
 
   // For mofifying scheduler state. Not needed for Wait(), or if the thread only
@@ -342,7 +341,7 @@ class Scheduler {
   int active_tid_;
 
   // For time slices.
-  static const int kSliceLength = 1;
+  static const int kSliceLength = 2;
   int slice_;
 
   // Info for blocked threads.

@@ -74,7 +74,7 @@ void Scheduler::StrategyRandomInitialise() {
   RescheduleFunc = &Scheduler::StrategyRandomReschedule;
   SignalWakeFunc = &Scheduler::StrategyRandomSignalWake;
   last_free_idx_ = 0;
-  internal_memset(cond_vars_, kInactive, sizeof(thread_cond_));
+  internal_memset(cond_vars_, kInactive, sizeof(cond_vars_));
   atomic_store(&cond_vars_[0], kActive, memory_order_relaxed);
   reschedule_tick_ = 0;
 }
@@ -100,9 +100,6 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
   Printf("%d - %d - ", thr->tid, tick_);
   PrintUserSanitizerStackBoundary();
   Printf("\n");
-if (tick_ == 2106) {
-Printf("Here\n");
-}
   // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
@@ -209,11 +206,11 @@ void Scheduler::StrategyRandomSignalWake(ThreadState *thr) {
     if (atomic_compare_exchange_strong(
         &cond_vars_[active_tid_], &cmp, kInactive, memory_order_relaxed)) {
       break;
-      mtx.Unlock();
-      proc_yield(20);
-      cmp = kActive;
-      mtx.Lock();
     }
+    mtx.Unlock();
+    proc_yield(20);
+    cmp = kActive;
+    mtx.Lock();
   }
   // It is possible that a thread unlocked this thread since the last check.
   if (thread_status_[thr->tid] != DISABLED) {

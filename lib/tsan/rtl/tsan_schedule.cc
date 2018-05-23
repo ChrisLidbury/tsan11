@@ -111,8 +111,8 @@ void Scheduler::Initialise() {
   slice_ = kSliceLength;
 
   // Select scheduler strategy
-  StrategyRandomInitialise();
-  //StrategyQueueInitialise();
+  //StrategyRandomInitialise();
+  StrategyQueueInitialise();
 
   // Set up demo playback.
   DemoPlayInitialise();
@@ -257,6 +257,7 @@ void Scheduler::ForkAfterChild(ThreadState *thr, u64 id) {
 // Signal handling.
 ////////////////////////////////////////
 
+// TODO not reentrant safe
 bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
   SignalWake(thr);
   mtx.Lock();
@@ -533,7 +534,7 @@ void Scheduler::SyscallRecvfrom(
 static bool ReadCmsgHdr(void *msghdr, int *scm_fds, int *scm_fds_count) {
   const unsigned kCmsgDataOffset =
       RoundUpTo(sizeof(__sanitizer_cmsghdr), sizeof(uptr));
-  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;   /* if (msg->msg_controllen == 56) msg->msg_controllen = 32;*/
+  __sanitizer_msghdr *msg = (__sanitizer_msghdr *)msghdr;            if (msg->msg_controllen == 56) msg->msg_controllen = 32;
   char *p = (char *)((__sanitizer_msghdr *)msg)->msg_control;
   char *const control_end = p + msg->msg_controllen;
   bool has_ancilliary = false;

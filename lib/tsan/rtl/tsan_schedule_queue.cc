@@ -20,11 +20,16 @@ const int kEnabled = 0;
 const int kDisabled = 1;
 atomic_uintptr_t enabled[Scheduler::kNumThreads];
 
-// Time slicing is racy with respect to Reschedule(), so they must both close
-// and open the gate before they can proceed.
-const int kOpen = 1;
-const int kClosed = 0;
-//atomic_uintptr_t slice_gate_[Scheduler::kNumThreads];
+// Used by Tick() to direct the next Wait() to a queue position. Usually just
+// used by the time slicing to keep the same queue position.
+u64 direct_queue_pos_[Scheduler::kNumThreads];
+
+// Allows asynchronous events (e.g. Reschedule()) to interrupt the scheduling.
+// Threads can only clear Wait(), and events can only activate, if the gate is
+// open; the gate is closed behind them.
+static const int kOpen = 0;
+static const int kClosed = 1;
+atomic_uintptr_t wait_gate_[Scheduler::kNumThreads];
 
 // For demo play. This strategy has an extra 'QUEUE' file that threads will read
 // from, instead of taking queue_head.
@@ -56,21 +61,29 @@ u64 demo_record_pos_[Scheduler::kNumThreads];
 u64 foff;
 const int kLineLength = 12;
 
-void QueueDemoPlayNext(int tid);
+// Used to determine when a reschedule event should take place.
+u64 reschedule_slice_;
+u64 reschedule_head_;
+
+void QueueDemoPlayInitialise();
+void QueueDemoPlayNext(int tid, u64 pos);
+void QueueDemoRecordInitialise();
+void QueueDemoRecordNext(int tid, u64 pos);
 void QueueDemoRecordLine(char *buf, int tid, u64 pos);
 void QueueDemoRecordRepeat(char *buf, int tid, u64 count);
 
 // Initialise the demo play system specific to the queue strategy.
 void QueueDemoPlayInitialise() {
+  demo_play_queue_end_ = 0;
   // Open demo play file.
   if (flags()->play_demo && flags()->play_demo[0]) {
     uptr buffer_size;
     uptr contents_size;
     char buf[128];
-    internal_snprintf(buf, 128, "%s/%d-queue", flags()->play_demo, 0);
+    internal_snprintf(buf, 128, "%s/QUEUE", flags()->play_demo, 0);
     CHECK(ReadFileToBuffer(buf, &demo_contents_, &buffer_size, &contents_size));
     for (int idx = 0; idx < 80; ++idx) {
-      QueueDemoPlayNext(idx);
+      QueueDemoPlayNext(idx, 0);
     }
   } else {
     demo_contents_ = nullptr;
@@ -79,35 +92,33 @@ void QueueDemoPlayInitialise() {
     }
   }
   demo_play_last_tid_ = -1;
-  demo_play_queue_end_ = 0;
 }
 
 // Read the next queue position for the current thread from 'QUEUE'.
 // The current file position will be right for this thread.
-void QueueDemoPlayNext(int tid) {
+void QueueDemoPlayNext(int tid, u64 pos) {
   if (demo_contents_ == nullptr/* || demo_contents_[0] == '\0'*/) {
     return;
   }
 
   // First check if history is still valid.
-  u64 queue_head_= atomic_load(&queue_head, memory_order_relaxed);
-  if (queue_head_ < demo_play_queue_end_) {
+  if (pos < demo_play_queue_end_) {
     CHECK(demo_play_last_tid_ == tid && "demo play error");
-    demo_play_queue_pos_[tid] = queue_head_;
+    demo_play_queue_pos_[tid] = pos;
     return;
   }
   // If not then check if there will be.
   if (demo_contents_[0] == 'r' && demo_contents_[1] == 'e') {
     demo_play_last_tid_ = tid;
     demo_contents_ += 4;
-    u32 pos;
-    internal_memcpy(&pos, demo_contents_, sizeof(u32));
+    u32 end;
+    internal_memcpy(&end, demo_contents_, sizeof(u32));
     demo_contents_ += sizeof(u32);
-    demo_play_queue_end_ = pos;
+    demo_play_queue_end_ = end;
     demo_contents_ += (kLineLength - sizeof(int) - sizeof(u32));
-    demo_play_queue_pos_[tid] = queue_head_;
+    demo_play_queue_pos_[tid] = pos;
     // Silly, If the repeat length is 0.
-    if (queue_head_ < demo_play_queue_end_) {
+    if (pos < demo_play_queue_end_) {
       return;
     }
   }
@@ -115,7 +126,7 @@ void QueueDemoPlayNext(int tid) {
   int tid_;
   internal_memcpy(&tid_, demo_contents_, sizeof(int));
   demo_contents_ += sizeof(int);
-  CHECK(tid_ == tid && "Demo play file has desynchronised.");
+//  CHECK(tid_ == tid && "Demo play file has desynchronised.");
   u32 pos_;
   internal_memcpy(&pos_, demo_contents_, sizeof(u32));
   demo_contents_ += sizeof(u32);
@@ -129,7 +140,7 @@ void QueueDemoRecordInitialise() {
   foff = 0;
   if (flags()->record_demo && flags()->record_demo[0]) {
     char buf[128];
-    internal_snprintf(buf, 128, "%s/%d-queue", flags()->record_demo, 0);
+    internal_snprintf(buf, 128, "%s/QUEUE", flags()->record_demo, 0);
     record_fd_ = OpenFile(buf, WrOnly);
     for (int idx = 0; idx < 80; ++idx) {
       demo_record_file_pos_[idx] = foff;
@@ -154,21 +165,21 @@ void QueueDemoRecordInitialise() {
 // history on behalf of this thread.
 // All of the writes have been moved out of here and placed at the end of
 // Tick(), after the critical section, using pwrite.
-void QueueDemoRecordNext(ThreadState *thr, u64 tick, u64 pos) {
+void QueueDemoRecordNext(int tid, u64 pos) {
   if (record_fd_ == kInvalidFd) {
     return;
   }
 
   // History compacting for repeating threads.
   // First see if a previous repeat needs to be stored.
-  if (demo_record_last_tid_ != thr->tid && demo_record_last_pos_ != (u64)-1) {
-    demo_record_re_tid_[thr->tid] = demo_record_last_tid_;
-    demo_record_re_pos_[thr->tid] = demo_record_last_pos_;
-    demo_record_queue_[thr->tid] = pos;
+  if (demo_record_last_tid_ != tid && demo_record_last_pos_ != (u64)-1) {
+    demo_record_re_tid_[tid] = demo_record_last_tid_;
+    demo_record_re_pos_[tid] = demo_record_last_pos_;
+    demo_record_queue_[tid] = pos;
     demo_record_last_pos_ = (u64)-1;
   }
   // Now see if we are repeating.
-  if (demo_record_last_tid_ == thr->tid) {
+  if (demo_record_last_tid_ == tid) {
     // Are there already repeat line reserved in the demo file?
     if (demo_record_last_pos_ != (u64)-1) {
       return;
@@ -178,16 +189,16 @@ void QueueDemoRecordNext(ThreadState *thr, u64 tick, u64 pos) {
     foff += kLineLength;
   } else {
     // First consecutive write. Fall through and do the usual.
-    demo_record_last_tid_ = thr->tid;
+    demo_record_last_tid_ = tid;
   }
 
   // Save current file pos.
   uptr restore = foff;
   foff += kLineLength;
   // Write the previous entry.
-  demo_record_queue_[thr->tid] = pos;
-  demo_record_pos_[thr->tid] = demo_record_file_pos_[thr->tid];
-  demo_record_file_pos_[thr->tid] = restore;
+  demo_record_queue_[tid] = pos;
+  demo_record_pos_[tid] = demo_record_file_pos_[tid];
+  demo_record_file_pos_[tid] = restore;
 }
 
 // Utility to declutter record methods.
@@ -232,29 +243,52 @@ void Scheduler::StrategyQueueInitialise() {
   EnableFunc     = &Scheduler::StrategyQueueEnable;
   DisableFunc    = &Scheduler::StrategyQueueDisable;
   RescheduleFunc = &Scheduler::StrategyQueueReschedule;
-  atomic_store(&queue_head, 0, memory_order_relaxed);
-  atomic_store(&queue_tail, 0, memory_order_relaxed);
+  SignalWakeFunc = &Scheduler::StrategyQueueSignalWake;
+  atomic_store(&queue_head, 1, memory_order_relaxed);
+  atomic_store(&queue_tail, 1, memory_order_relaxed);
   atomic_store(&enabled[0], kEnabled, memory_order_relaxed);
+  internal_memset(direct_queue_pos_, 0, sizeof(direct_queue_pos_));
+  internal_memset(wait_gate_, kOpen, sizeof(wait_gate_));
+  reschedule_slice_ = 0;
+  reschedule_head_ = 0;
   QueueDemoPlayInitialise();
   QueueDemoRecordInitialise();
 }
 
 void Scheduler::StrategyQueueWait(ThreadState *thr) {
   if (exclude_point_[thr->tid] == 1) {
-    // TODO reschedule?
     return;
   }
   // Is thread blocked (e.g. mutex lock fail).
   uptr stat = kEnabled;
   while (!atomic_compare_exchange_strong(
       &enabled[thr->tid], &stat, kEnabled, memory_order_relaxed)) {
-    // TODO dynamic wait method.
     stat = kEnabled;
     proc_yield(20);
   }
-  u64 pos = atomic_fetch_add(&queue_tail, 1, memory_order_relaxed);
-  pos = demo_play_queue_pos_[thr->tid] != 0 ?
-      demo_play_queue_pos_[thr->tid] : pos;
+
+  // Get next position in queue. Precedence is direct > demo > queue.
+  u64 pos;
+  if (direct_queue_pos_[thr->tid] != 0) {
+    // Continue time slice, unless rescheduled.
+    pos = direct_queue_pos_[thr->tid];
+    direct_queue_pos_[thr->tid] = 0;
+    uptr cmp = kOpen;
+    if (!atomic_compare_exchange_strong(
+        &wait_gate_[thr->tid], &cmp, kClosed, memory_order_relaxed)) {
+      // Reschedule()'d.
+      atomic_store(&wait_gate_[thr->tid], kOpen, memory_order_relaxed);
+      pos = atomic_fetch_add(&queue_tail, 1, memory_order_relaxed);
+    }
+  } else if (demo_play_queue_pos_[thr->tid] != 0) {
+    // Read from demo file. Occurs at start of each slice.
+    pos = demo_play_queue_pos_[thr->tid];
+    atomic_fetch_add(&queue_tail, 1, memory_order_relaxed);
+  } else {
+    // No demo or slice, get to the back of the queue.
+    pos = atomic_fetch_add(&queue_tail, 1, memory_order_relaxed);
+  }
+
   // Has queue caught up yet.
   u64 cmp = pos;
   while (!atomic_compare_exchange_strong(
@@ -268,19 +302,57 @@ void Scheduler::StrategyQueueWait(ThreadState *thr) {
 void Scheduler::StrategyQueueTick(ThreadState *thr) {
   mtx.Lock();
   // DEBUG
-  //Printf("%d - %d - ", thr->tid, tick_);
-  //PrintUserSanitizerStackBoundary();
-  //Printf("\n");
+  Printf("%d - %d - ", thr->tid, tick_);
+  PrintUserSanitizerStackBoundary();
+  Printf("\n");
+  // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     mtx.Unlock();
     return;
   }
+
+  // Demo event checked first, there should be at most one reschedule.
+  bool rescheduled = false;
+  DemoPlayPeekNext();
+  while (DemoPlayActive() && tick_ == demo_play_.demo_tick_) {
+    if (demo_play_.event_type_ == RESCHEDULE) {
+      CHECK(slice_ > 1 && "Stray RESCHEDULE.");
+      CHECK(!rescheduled && "Multiple RESCHEDULE.");
+      rescheduled = true;
+    } else if (demo_play_.event_type_ == SIG_WAKEUP) {
+      Enable(demo_play_.event_param_);
+    } else {
+      CHECK(false && "Unknown event type in replay.");
+    }
+    DemoRecordNext(tick_, demo_play_.event_type_, demo_play_.event_param_, 0);
+    DemoPlayNext();
+  }
+  // Check for time slice.
+  bool need_record = (slice_ == kSliceLength);
+  u64 pos = 0;
+  if (slice_ > 1 && thread_status_[thr->tid] == RUNNING && !rescheduled) {
+    --slice_;
+    pos = atomic_load(&queue_head, memory_order_relaxed);
+    direct_queue_pos_[thr->tid] = pos;
+    active_tid_ = thr->tid;
+    atomic_store(&wait_gate_[thr->tid], kOpen, memory_order_relaxed);
+  } else {
+    slice_ = kSliceLength;
+    // Careful with this, it will let the next thread return from Wait().
+    pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
+    active_tid_ = -1;
+  }
+  CHECK((!need_record || pos != 0) && "Bad queue position");
+
+  // Kinda hacky, but only record and replay at the start of each slice.
+  if (need_record) {
+    QueueDemoPlayNext(thr->tid, pos + 1);
+    QueueDemoRecordNext(thr->tid, pos);
+  }
   SignalPending(thr);
-  u64 pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
-  QueueDemoPlayNext(thr->tid);
-  QueueDemoRecordNext(thr, tick_, pos);
   ++tick_;
   mtx.Unlock();
+
   // This is part of record, which has been pulled out to free the lock.
   char line[33];
   if (demo_record_re_tid_[thr->tid] != -1) {
@@ -293,9 +365,14 @@ void Scheduler::StrategyQueueTick(ThreadState *thr) {
     REAL(pwrite)(record_fd_, line, 12, demo_record_pos_[thr->tid]);
     demo_record_pos_[thr->tid] = (u64)-1;
   }
-  // End of record
+
   ProcessPendingSignals(thr);
-  // TODO exclude reenter
+  // If this was excluded, it must exit and reenter.
+  if (exclude_point_[thr->tid] == 1) {
+    exclude_point_[thr->tid] = 0;
+    Wait(thr);
+    exclude_point_[thr->tid] = 1;
+  }
 }
 
 void Scheduler::StrategyQueueEnable(int tid) {
@@ -309,7 +386,60 @@ void Scheduler::StrategyQueueDisable(int tid) {
 }
 
 void Scheduler::StrategyQueueReschedule() {
+  if (kSliceLength < 2) {
+    return;
+  }
+  mtx.Lock();
+  if (DemoPlayActive() || exclude_point_[active_tid_] == 1) {
+    mtx.Unlock();
+    return;
+  }
 
+  u64 this_slice = slice_;
+  u64 this_head = atomic_load(&queue_head, memory_order_relaxed);
+  // Not in the middle of a slice.
+  if (this_slice == kSliceLength) {
+    mtx.Unlock();
+    return;
+  }
+  // Have advanced since last Reschedule().
+  if (!(this_slice == reschedule_slice_ && this_head == reschedule_head_)) {
+    reschedule_slice_ = this_slice;
+    reschedule_head_ = this_head;
+    mtx.Unlock();
+    return;
+  }
+  // active_tid_ is set to a tid if it is in the middle of a slice.
+  int tid = active_tid_;
+  if (exclude_point_[tid] == 1) {
+    mtx.Unlock();
+    return;
+  }
+  CHECK(tid != -1 && "Oops!");
+  // Try and stop the thread
+  uptr cmp = kOpen;
+  if (!atomic_compare_exchange_strong(
+      &wait_gate_[tid], &cmp, kClosed, memory_order_relaxed)) {
+    mtx.Unlock();
+    return;
+  }
+  // Pseudo tick.
+  slice_ = kSliceLength;
+  atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
+  active_tid_ = -1;
+  DemoRecordOverride(tick_ - 1, RESCHEDULE, 1, 0);
+  mtx.Unlock();
+}
+
+void Scheduler::StrategyQueueSignalWake(ThreadState *thr) {
+  mtx.Lock();
+  if (DemoPlayActive() || thread_status_[thr->tid] != DISABLED) {
+    mtx.Unlock();
+    return;
+  }
+  Enable(thr->tid);
+  DemoRecordNext(tick_ - 1, SIG_WAKEUP, thr->tid, 0);
+  mtx.Unlock();
 }
 
 }  // namespace __tsan
