@@ -65,6 +65,10 @@ const int kLineLength = 12;
 u64 reschedule_slice_;
 u64 reschedule_head_;
 
+// For BlockWait and BlockSignal. This may need to be a heap as I cannot
+// guarantee there is no contention for each space.
+atomic_uint32_t block_pos_[Scheduler::kNumThreads];
+
 void QueueDemoPlayInitialise();
 void QueueDemoPlayNext(int tid, u64 pos);
 void QueueDemoRecordInitialise();
@@ -249,6 +253,7 @@ void Scheduler::StrategyQueueInitialise() {
   atomic_store(&enabled[0], kEnabled, memory_order_relaxed);
   internal_memset(direct_queue_pos_, 0, sizeof(direct_queue_pos_));
   internal_memset(wait_gate_, kOpen, sizeof(wait_gate_));
+  internal_memset(block_pos_, -1, sizeof(block_pos_));
   reschedule_slice_ = 0;
   reschedule_head_ = 0;
   QueueDemoPlayInitialise();
@@ -260,12 +265,15 @@ void Scheduler::StrategyQueueWait(ThreadState *thr) {
     return;
   }
   // Is thread blocked (e.g. mutex lock fail).
-  uptr stat = kEnabled;
+  /*uptr stat = kEnabled;
   while (!atomic_compare_exchange_strong(
       &enabled[thr->tid], &stat, kEnabled, memory_order_relaxed)) {
     stat = kEnabled;
+    ProcessPendingSignals(thr);  // Dangerous, must change.
     proc_yield(20);
-  }
+  }*/
+  BlockWait(thr->tid, &enabled[thr->tid], kEnabled, kEnabled,
+      !signal_context_[thr->tid]);
 
   // Get next position in queue. Precedence is direct > demo > queue.
   u64 pos;
@@ -290,21 +298,24 @@ void Scheduler::StrategyQueueWait(ThreadState *thr) {
   }
 
   // Has queue caught up yet.
-  u64 cmp = pos;
+  /*u64 cmp = pos;
   while (!atomic_compare_exchange_strong(
       &queue_head, &cmp, pos, memory_order_relaxed)) {
     CHECK(cmp <= pos && "Uh oh!");  // Only for reschedule
     cmp = pos;
     proc_yield(20);
-  }
+  }*/
+  atomic_store(&block_pos_[pos % kNumThreads], thr->tid, memory_order_seq_cst);
+  BlockWait(thr->tid, (atomic_uintptr_t *)(&queue_head), pos, pos, false);  // dodgy cast
+  atomic_store(&block_pos_[pos % kNumThreads], -1, memory_order_seq_cst);
 }
 
 void Scheduler::StrategyQueueTick(ThreadState *thr) {
   mtx.Lock();
   // DEBUG
-  Printf("%d - %d - ", thr->tid, tick_);
-  PrintUserSanitizerStackBoundary();
-  Printf("\n");
+  //Printf("%d - %d - ", thr->tid, tick_);
+  //PrintUserSanitizerStackBoundary();
+  //Printf("\n");
   // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     mtx.Unlock();
@@ -340,6 +351,11 @@ void Scheduler::StrategyQueueTick(ThreadState *thr) {
     slice_ = kSliceLength;
     // Careful with this, it will let the next thread return from Wait().
     pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
+    unsigned signal_tid =
+        atomic_load(&block_pos_[(pos + 1) % kNumThreads], memory_order_seq_cst);
+    if (signal_tid != (u32)-1) {
+      BlockSignal(signal_tid);
+    }
     active_tid_ = -1;
   }
   CHECK((!need_record || pos != 0) && "Bad queue position");
@@ -378,6 +394,7 @@ void Scheduler::StrategyQueueTick(ThreadState *thr) {
 void Scheduler::StrategyQueueEnable(int tid) {
   thread_status_[tid] = RUNNING;
   atomic_store(&enabled[tid], kEnabled, memory_order_relaxed);
+  BlockSignal(tid);
 }
 
 void Scheduler::StrategyQueueDisable(int tid) {
@@ -425,7 +442,12 @@ void Scheduler::StrategyQueueReschedule() {
   }
   // Pseudo tick.
   slice_ = kSliceLength;
-  atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
+  u64 pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
+  unsigned signal_tid =
+      atomic_load(&block_pos_[(pos + 1) % kNumThreads], memory_order_seq_cst);
+  if (signal_tid != (u32)-1) {
+    BlockSignal(signal_tid);
+  }
   active_tid_ = -1;
   DemoRecordOverride(tick_ - 1, RESCHEDULE, 1, 0);
   mtx.Unlock();

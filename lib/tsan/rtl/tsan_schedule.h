@@ -105,9 +105,6 @@ class Scheduler {
   void ForkAfterParent(ThreadState *thr);
   void ForkAfterChild(ThreadState *thr, u64 id);
 
-  // Signals have some very subtle behaviours that need handling. In particular,
-  // when they can be received and ensuring they are replayed precisely.
-  //
   // Only asynchronous signals are handled, as these can be sent from other
   // threads or processes at any time. Synchronous signals (r.g. SIGSEGV,
   // SIGPIPE), are usually deteministically raised by the same thread.
@@ -239,6 +236,17 @@ class Scheduler {
   // Print the frame at the top of the user stack, before entering sanitizer.
   void PrintUserSanitizerStackBoundary();
 
+  // The normal way a thread blocks itself until a condition holds is a
+  // compare_exchange loop with proc_yield(20) inside. This takes up CPU time
+  // from active threads, and delays the scheduler if the thread is signalled
+  // just after a proc_yield call.
+  // These provide block/signal where the thread stays asleep until signalled,
+  // and will wake up quickly.
+  // Uses SIGUSR2 and sigwait, so SIGUSR2 cannot be used by the user.
+  void BlockWait(int tid, atomic_uintptr_t *p, u64 exp, u64 des,
+      bool allow_signal_arrival);
+  void BlockSignal(int tid);
+
 
   ////////////////////////////////////////
   // Demo playback.
@@ -353,6 +361,7 @@ class Scheduler {
 
   // For signals, each thread has an epoch for determinism.
   u64 signal_tick_[kNumThreads];
+  int signal_context_[kNumThreads];
 
   // For syscalls, some fds represent input. These will be recorded/replayed.
   // This is owned by both the record and replay state.
@@ -363,6 +372,10 @@ class Scheduler {
 
   // For excluding specific functions from the scheduler.
   int exclude_point_[kNumThreads];
+
+  // For the blocking wait and signal.
+  int pids_[kNumThreads];
+  atomic_uintptr_t block_gate_[kNumThreads];
 };
 
 }  // namespace __tsan

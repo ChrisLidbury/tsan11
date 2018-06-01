@@ -80,14 +80,16 @@ void Scheduler::StrategyRandomInitialise() {
 }
 
 void Scheduler::StrategyRandomWait(ThreadState *thr) {
-  uptr cmp = kActive;
+  /*uptr cmp = kActive;
   while (!atomic_compare_exchange_strong(
       &cond_vars_[thr->tid], &cmp, kCritical, memory_order_relaxed)) {
     CHECK(cmp == kInactive);
     cmp = kActive;
     ProcessPendingSignals(thr);  // Dangerous, must change.
     proc_yield(20);
-  }
+  }*/
+  BlockWait(thr->tid, &cond_vars_[thr->tid], kActive, kCritical,
+      !signal_context_[thr->tid]);
 }
 
 void Scheduler::StrategyRandomTick(ThreadState *thr) {
@@ -97,9 +99,9 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
       &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
   CHECK(is_critical);
   // DEBUG
-  Printf("%d - %d - ", thr->tid, tick_);
-  PrintUserSanitizerStackBoundary();
-  Printf("\n");
+  //Printf("%d - %d - ", thr->tid, tick_);
+  //PrintUserSanitizerStackBoundary();
+  //Printf("\n");
   // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
@@ -146,6 +148,7 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
       (next_tid == 0 && last_free_idx_ == 0));
   active_tid_ = next_tid;
   atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+  BlockSignal(next_tid);
   mtx.Unlock();
   ProcessPendingSignals(thr);
 }
@@ -187,8 +190,9 @@ void Scheduler::StrategyRandomReschedule() {
   int next_tid = Schedule(RandomNumber());
   slice_ = kSliceLength;
   CHECK(thread_status_[next_tid] == RUNNING);
-  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
   active_tid_ = next_tid;
+  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+  BlockSignal(next_tid);
   DemoRecordOverride(tick_ - 1, RESCHEDULE, 1, 0);
   mtx.Unlock();
 }
@@ -221,6 +225,7 @@ void Scheduler::StrategyRandomSignalWake(ThreadState *thr) {
   Enable(thr->tid);
   DemoRecordNext(tick_ - 1, SIG_WAKEUP, thr->tid, 0);
   atomic_store(&cond_vars_[active_tid_], kActive, memory_order_relaxed);
+  BlockSignal(active_tid_);
   mtx.Unlock();
 }
 

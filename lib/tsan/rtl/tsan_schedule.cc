@@ -1,10 +1,12 @@
 #include "tsan_schedule.h"
 
+#include "interception/interception.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
+#include "sanitizer_common/sanitizer_posix.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include "tsan_mutex.h"
 #include "tsan_rtl.h"
@@ -32,13 +34,23 @@ void ProcessPendingSignals(ThreadState *thr);
 // For accept.
 extern "C" int dup(int fd);
 
-// Only for POSIX.
-namespace __sanitizer {
+// For lseek.
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEET_END 2
-uptr internal_lseek(fd_t fd, OFF_T offset, int whence);
-}  // namespace __sanitizer
+
+// For blocking wait and signal
+__sanitizer::__sanitizer_sigset_t sleepsigset;  // Probably racy
+__sanitizer::__sanitizer_sigset_t blocksigset;
+#define	SIG_BLOCK 0
+#define	SIGUSR2	12
+static const int kSignal = SIGUSR2;
+extern "C" int sigaddset (void *__set, int __signo);
+DECLARE_REAL(int, sigwait, const void *set, int *info)
+DECLARE_REAL(int, sigprocmask, int how, const void *set, void *oldset)
+#define __NR_gettid 186
+#define __NR_tkill 200
+extern "C" long syscall(long number, ...);
 
 namespace __tsan {
 namespace {
@@ -93,9 +105,11 @@ Scheduler::Scheduler()
   internal_memset(wait_tid_, -1, sizeof(wait_tid_));
   internal_memset(thread_cond_, 0, sizeof(thread_cond_));
   internal_memset(thread_mtx_, 0, sizeof(thread_mtx_));
+  internal_memset(signal_context_, 0, sizeof(signal_context_));
   internal_memset(exclude_point_, 0, sizeof(exclude_point_));
   internal_memset(input_fd_, 0, sizeof(input_fd_));
   internal_memset(pipe_fd_, 0, sizeof(pipe_fd_));
+  internal_memset(block_gate_, 0, sizeof(block_gate_));
 }
 
 Scheduler::~Scheduler() {
@@ -109,10 +123,13 @@ void Scheduler::Initialise() {
   s[1] = rdtsc();
   // Time slices
   slice_ = kSliceLength;
+  // Block wait/signal
+  sigaddset(&blocksigset, kSignal);
+  internal_sigfillset(&sleepsigset);
 
   // Select scheduler strategy
-  //StrategyRandomInitialise();
-  StrategyQueueInitialise();
+  StrategyRandomInitialise();
+  //StrategyQueueInitialise();
 
   // Set up demo playback.
   DemoPlayInitialise();
@@ -272,9 +289,11 @@ bool Scheduler::SignalReceive(ThreadState *thr, int signum, bool blocking) {
   }
   // Signal handler will be entered after returning true.
   mtx.Unlock();
+  signal_context_[thr->tid] = true;
   ScopedScheduler scoped(this, thr);
   DemoRecordSignalNext(thr->tid, signal_tick_[thr->tid], signum);
   DemoPlaySignalNext(thr->tid);
+  signal_context_[thr->tid] = false;
   return true;
 }
 
@@ -854,6 +873,48 @@ void Scheduler::PrintUserSanitizerStackBoundary() {
   stack->ClearAll();
 }
 
+void Scheduler::BlockWait(
+    int tid, atomic_uintptr_t *p, u64 exp, u64 des, bool allow_signal_arrival) {
+  int sig;
+  // If allowing signals is false, the sigset for sigwait will only contain
+  // SIGUSR2, otherwise contains all signals, and can reenter BlockWait().
+  __sanitizer::__sanitizer_sigset_t *waitsigset =
+      allow_signal_arrival ? &sleepsigset : &blocksigset;
+  uptr stat = exp;
+  atomic_store(&block_gate_[tid], 1, memory_order_seq_cst);
+  while (!atomic_compare_exchange_strong(p, &stat, des, memory_order_seq_cst)) {
+    pids_[tid] = syscall(__NR_gettid);
+    // Block SIGUSR2, before BlockSignal can send it.
+    REAL(sigprocmask)(SIG_BLOCK, &blocksigset, nullptr);
+    // When this becomes 2, it must wait for a SIGUSR2.
+    atomic_store(&block_gate_[tid], 2, memory_order_seq_cst);
+    // Problem: what if a signal other than SIGUSR2 arrived earlier?
+    REAL(sigwait)(waitsigset, &sig);
+    if (sig != kSignal) {
+      // Normal signal, pass to tsan signal handler.
+      CHECK(allow_signal_arrival && "Signal arrived?!");
+      atomic_store(&block_gate_[tid], 0, memory_order_seq_cst);
+      rtl_internal_sighandler(sig);
+      ProcessPendingSignals(cur_thread());
+      atomic_store(&block_gate_[tid], 1, memory_order_seq_cst);
+    }
+    stat = exp;
+  }
+  atomic_store(&block_gate_[tid], 0, memory_order_seq_cst);
+}
+
+void Scheduler::BlockSignal(int tid) {
+  u64 gate;
+  while ((gate = atomic_load(&block_gate_[tid], memory_order_seq_cst)) > 0) {
+    if (gate == 1) {
+      continue;
+    }
+    CHECK(gate == 2 && "BlockSignal error");
+    CHECK(pids_[tid] != 0 && "Bad tid");
+    syscall(__NR_tkill, pids_[tid], kSignal);
+    break;
+  }
+}
 
 ////////////////////////////////////////
 // Demo playback.
