@@ -121,15 +121,24 @@ void Scheduler::Initialise() {
   // Assumes ownership of PRNG buffer. Can make a member if multiple schedulers.
   s[0] = rdtsc();
   s[1] = rdtsc();
+
   // Time slices
-  slice_ = kSliceLength;
+  slice_length = flags()->time_slice;
+  slice_ = slice_length;
+  // Print stack boundaries
+  print_trace = flags()->print_trace;
   // Block wait/signal
   sigaddset(&blocksigset, kSignal);
   internal_sigfillset(&sleepsigset);
 
   // Select scheduler strategy
-  StrategyRandomInitialise();
-  //StrategyQueueInitialise();
+  if (internal_strncmp(flags()->scheduler, "random", 6) == 0) {
+    StrategyRandomInitialise();
+  } else if (internal_strncmp(flags()->scheduler, "queue", 5) == 0) {
+    StrategyQueueInitialise();
+  } else {
+    CHECK(false && "Unknown shceduler strategy");
+  }
 
   // Set up demo playback.
   DemoPlayInitialise();

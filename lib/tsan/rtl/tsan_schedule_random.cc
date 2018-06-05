@@ -99,9 +99,11 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
       &cond_vars_[thr->tid], &cmp, kInactive, memory_order_relaxed);
   CHECK(is_critical);
   // DEBUG
-  //Printf("%d - %d - ", thr->tid, tick_);
-  //PrintUserSanitizerStackBoundary();
-  //Printf("\n");
+  if (print_trace) {
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
+  }
   // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     atomic_store(&cond_vars_[thr->tid], kActive, memory_order_relaxed);
@@ -119,7 +121,7 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
     --slice_;
   } else {
     next_tid = Schedule(RandomNumber());
-    slice_ = kSliceLength;
+    slice_ = slice_length;
   }
   // Replay any events that occured between this Tick() and the next Wait().
   DemoPlayPeekNext();
@@ -130,7 +132,7 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
           ++pri_[next_tid];
         }
         next_tid = Schedule(RandomNumber());
-        slice_ = kSliceLength;
+        slice_ = slice_length;
       }
     } else if (demo_play_.event_type_ == SIG_WAKEUP) {
       Enable(demo_play_.event_param_);
@@ -188,7 +190,7 @@ void Scheduler::StrategyRandomReschedule() {
     ++pri_[tid];
   }
   int next_tid = Schedule(RandomNumber());
-  slice_ = kSliceLength;
+  slice_ = slice_length;
   CHECK(thread_status_[next_tid] == RUNNING);
   active_tid_ = next_tid;
   atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);

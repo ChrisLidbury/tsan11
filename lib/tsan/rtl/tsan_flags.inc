@@ -83,5 +83,10 @@ TSAN_FLAG(bool, shared_ptr_interceptor, true,
           "Track atomic reference counting in libc++ shared_ptr and weak_ptr.")
 
 // For scheduler
-TSAN_FLAG(const char *, play_demo, "", "Demo playback file.")
-TSAN_FLAG(const char *, record_demo, "", "Demo record file.")
+TSAN_FLAG(const char *, play_demo, "", "Demo playback folder.")
+TSAN_FLAG(const char *, record_demo, "", "Demo record folder.")
+TSAN_FLAG(bool, print_trace, false,
+          "Print stack boundary for each visible operation.")
+TSAN_FLAG(int, time_slice, 1,
+          "Number of consecutive visible operations for each scheduler choice.")
+TSAN_FLAG(const char *, scheduler, "random", "Scheduler strategy.")

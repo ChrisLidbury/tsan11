@@ -62,7 +62,7 @@ u64 foff;
 const int kLineLength = 12;
 
 // Used to determine when a reschedule event should take place.
-u64 reschedule_slice_;
+int reschedule_slice_;
 u64 reschedule_head_;
 
 // For BlockWait and BlockSignal. This may need to be a heap as I cannot
@@ -313,9 +313,11 @@ void Scheduler::StrategyQueueWait(ThreadState *thr) {
 void Scheduler::StrategyQueueTick(ThreadState *thr) {
   mtx.Lock();
   // DEBUG
-  //Printf("%d - %d - ", thr->tid, tick_);
-  //PrintUserSanitizerStackBoundary();
-  //Printf("\n");
+  if (print_trace) {
+    Printf("%d - %d - ", thr->tid, tick_);
+    PrintUserSanitizerStackBoundary();
+    Printf("\n");
+  }
   // If annotated out, immediately reenable this thread.
   if (exclude_point_[thr->tid] == 1 && thread_status_[thr->tid] != DISABLED) {
     mtx.Unlock();
@@ -339,7 +341,7 @@ void Scheduler::StrategyQueueTick(ThreadState *thr) {
     DemoPlayNext();
   }
   // Check for time slice.
-  bool need_record = (slice_ == kSliceLength);
+  bool need_record = (slice_ == slice_length);
   u64 pos = 0;
   if (slice_ > 1 && thread_status_[thr->tid] == RUNNING && !rescheduled) {
     --slice_;
@@ -348,7 +350,7 @@ void Scheduler::StrategyQueueTick(ThreadState *thr) {
     active_tid_ = thr->tid;
     atomic_store(&wait_gate_[thr->tid], kOpen, memory_order_relaxed);
   } else {
-    slice_ = kSliceLength;
+    slice_ = slice_length;
     // Careful with this, it will let the next thread return from Wait().
     pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
     unsigned signal_tid =
@@ -403,7 +405,7 @@ void Scheduler::StrategyQueueDisable(int tid) {
 }
 
 void Scheduler::StrategyQueueReschedule() {
-  if (kSliceLength < 2) {
+  if (slice_length < 2) {
     return;
   }
   mtx.Lock();
@@ -412,10 +414,10 @@ void Scheduler::StrategyQueueReschedule() {
     return;
   }
 
-  u64 this_slice = slice_;
+  int this_slice = slice_;
   u64 this_head = atomic_load(&queue_head, memory_order_relaxed);
   // Not in the middle of a slice.
-  if (this_slice == kSliceLength) {
+  if (this_slice == slice_length) {
     mtx.Unlock();
     return;
   }
@@ -441,7 +443,7 @@ void Scheduler::StrategyQueueReschedule() {
     return;
   }
   // Pseudo tick.
-  slice_ = kSliceLength;
+  slice_ = slice_length;
   u64 pos = atomic_fetch_add(&queue_head, 1, memory_order_relaxed);
   unsigned signal_tid =
       atomic_load(&block_pos_[(pos + 1) % kNumThreads], memory_order_seq_cst);

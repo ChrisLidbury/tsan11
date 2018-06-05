@@ -349,8 +349,11 @@ class Scheduler {
   int active_tid_;
 
   // For time slices.
-  static const int kSliceLength = 2;
+  int slice_length = 1;
   int slice_;
+
+  // Debug info
+  bool print_trace = false;
 
   // Info for blocked threads.
   enum Status { FINISHED = 0, DISABLED = 1, CONDITIONAL = 2, RUNNING = 3 };
