@@ -89,4 +89,8 @@ TSAN_FLAG(bool, print_trace, false,
           "Print stack boundary for each visible operation.")
 TSAN_FLAG(int, time_slice, 1,
           "Number of consecutive visible operations for each scheduler choice.")
-TSAN_FLAG(const char *, scheduler, "random", "Scheduler strategy.")
+TSAN_FLAG(const char *, scheduler, "random",
+          "Scheduler strategy."
+          "none   - no scheduler strategy."
+          "random - random (default)."
+          "queue  - first come first serve.")

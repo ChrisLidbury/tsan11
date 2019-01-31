@@ -149,7 +149,7 @@ void Scheduler::StrategyRandomTick(ThreadState *thr) {
   CHECK(thread_status_[next_tid] == RUNNING ||
       (next_tid == 0 && last_free_idx_ == 0));
   active_tid_ = next_tid;
-  atomic_store(&cond_vars_[next_tid], kActive, memory_order_relaxed);
+  atomic_store(&cond_vars_[next_tid], kActive, memory_order_seq_cst/*memory_order_relaxed*/);
   BlockSignal(next_tid);
   mtx.Unlock();
   ProcessPendingSignals(thr);
@@ -163,6 +163,7 @@ void Scheduler::StrategyRandomEnable(int tid) {
 }
 
 void Scheduler::StrategyRandomDisable(int tid) {
+//CHECK(last_free_idx_ > 1 && "No runnable threads");
   int tid_last_idx = cond_vars_idx_[--last_free_idx_];
   cond_vars_idx_[cond_vars_idx_inv_[tid]] = tid_last_idx;
   cond_vars_idx_inv_[tid_last_idx] = cond_vars_idx_inv_[tid];

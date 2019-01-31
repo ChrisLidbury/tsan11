@@ -132,7 +132,9 @@ void Scheduler::Initialise() {
   internal_sigfillset(&sleepsigset);
 
   // Select scheduler strategy
-  if (internal_strncmp(flags()->scheduler, "random", 6) == 0) {
+  if (internal_strncmp(flags()->scheduler, "none", 4) == 0) {
+    StrategyNoneInitialise();
+  } else if (internal_strncmp(flags()->scheduler, "random", 6) == 0) {
     StrategyRandomInitialise();
   } else if (internal_strncmp(flags()->scheduler, "queue", 5) == 0) {
     StrategyQueueInitialise();
@@ -432,7 +434,11 @@ void Scheduler::SyscallGetsockname(int *ret, int sockfd, void *addr, unsigned *a
 }
 
 void Scheduler::SyscallGettimeofday(int *ret, void *tv, void *tz) {
-  // Meh
+  void *params[2] = {ret, tv};
+  uptr param_size[2] = {sizeof(int), timeval_sz};
+  ScopedScheduler scoped(this, cur_thread());
+  DemoPlaySyscallNext("gettimeofday", 2, params, param_size);
+  DemoRecordSyscallNext("gettimeofday", 2, params, param_size);
 }
 
 void Scheduler::SyscallIoctl(

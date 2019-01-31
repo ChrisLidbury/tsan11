@@ -50,6 +50,7 @@ set(TSAN_SOURCES
   rtl/tsan_rtl_report.cc
   rtl/tsan_rtl_thread.cc
   rtl/tsan_schedule.cc
+  rtl/tsan_schedule_none.cc
   rtl/tsan_schedule_random.cc
   rtl/tsan_schedule_queue.cc
   rtl/tsan_stack_trace.cc

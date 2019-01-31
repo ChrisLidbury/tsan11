@@ -208,6 +208,16 @@ class Scheduler {
   // - Does it work with time slicing.
   // - Handle signals properly?
 
+  // No scheduling.
+  //struct StrategyNone;
+  void StrategyNoneInitialise();
+  void StrategyNoneWait(ThreadState *thr);
+  void StrategyNoneTick(ThreadState *thr);
+  void StrategyNoneEnable(int tid);
+  void StrategyNoneDisable(int tid);
+  void StrategyNoneReschedule();
+  void StrategyNoneSignalWake(ThreadState *thr);
+
   // Random scheduling.
   //struct StrategyRandom;
   void StrategyRandomInitialise();
